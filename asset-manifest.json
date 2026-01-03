@@ -1,0 +1,15 @@
+{
+  "files": {
+    "main.css": "/librarywala/static/css/main.eee4f38d.css",
+    "main.js": "/librarywala/static/js/main.a72f096b.js",
+    "static/js/453.9f344785.chunk.js": "/librarywala/static/js/453.9f344785.chunk.js",
+    "index.html": "/librarywala/index.html",
+    "main.eee4f38d.css.map": "/librarywala/static/css/main.eee4f38d.css.map",
+    "main.a72f096b.js.map": "/librarywala/static/js/main.a72f096b.js.map",
+    "453.9f344785.chunk.js.map": "/librarywala/static/js/453.9f344785.chunk.js.map"
+  },
+  "entrypoints": [
+    "static/css/main.eee4f38d.css",
+    "static/js/main.a72f096b.js"
+  ]
+}
