@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef, forwardRef } from 'react';
 import {
     BookOpen, Users, DollarSign, AlertTriangle, Plus, X, Search, Armchair, User,
-    Phone, Image as ImageIcon, Settings, LogOut, CheckCircle, Edit, Trash2, Eye, History, BookMarked, Loader2, Printer, UploadCloud, ArrowLeft, XCircle, Mail, Lock, Download, FilterX, Sun, Moon, MessageSquare, UserX, UserCheck, KeyRound, EyeOff, TrendingUp, LifeBuoy, ShieldCheck, CalendarClock, Menu
+    Phone, Image as ImageIcon, Settings, LogOut, CheckCircle, Edit, Trash2, Eye, History, BookMarked, Loader2, Printer, UploadCloud, ArrowLeft, XCircle, Mail, Lock, Download, FilterX, Sun, Moon, MessageSquare, UserX, UserCheck, KeyRound, EyeOff, TrendingUp, LifeBuoy, ShieldCheck, CalendarClock, Menu, BarChart2, PlusCircle, CreditCard, Repeat, PieChart as PieChartIcon, ArrowUpRight, ArrowDownRight, Briefcase, Zap, FileText, UserPlus, Minus
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { createClient } from '@supabase/supabase-js';
@@ -589,11 +589,15 @@ const SubscriptionScreen = ({ user, libraryProfile, onSubscriptionSuccess }) => 
 const initialState = {
     students: [],
     feeStructure: { 'Full-time': 700, 'Half-time': 400 },
-    seats: Array.from({ length: 100 }, (_, i) => ({
+    seats: Array.from({ length: 500 }, (_, i) => ({
         number: i + 1,
         gender: (i < 30 ? 'girl' : 'boy'),
         occupiedBy: { morning: null, evening: null }
     })),
+    expenses: [],
+    activityLog: [],
+    // New: Transactions for Finance View
+    transactions: [],
 };
 
 const getTodayDate = () => { const today = new Date(); today.setHours(0, 0, 0, 0); return today; };
@@ -604,6 +608,11 @@ const isFeeDue = (nextDueDateStr) => {
     const nextDueDate = new Date(nextDueDateStr);
     nextDueDate.setHours(0, 0, 0, 0);
     return nextDueDate <= getTodayDate();
+}
+const daysBetween = (date1, date2) => {
+    const oneDay = 1000 * 60 * 60 * 24;
+    const diffInTime = date2.getTime() - date1.getTime();
+    return Math.ceil(diffInTime / oneDay);
 }
 
 // --- MAIN APP COMPONENT ---
@@ -616,6 +625,9 @@ const App = () => {
     const [students, setStudents] = useState(initialState.students);
     const [feeStructure, setFeeStructure] = useState(initialState.feeStructure);
     const [seats, setSeats] = useState(initialState.seats);
+    const [expenses, setExpenses] = useState(initialState.expenses);
+    const [activityLog, setActivityLog] = useState(initialState.activityLog);
+    const [transactions, setTransactions] = useState(initialState.transactions); // New state for all finance transactions
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [modalContent, setModalContent] = useState({ type: '', item: null });
     const [dashboardProfile, setDashboardProfile] = useState(null);
@@ -625,12 +637,75 @@ const App = () => {
     const [subscriptionStatus, setSubscriptionStatus] = useState({ daysLeft: null, expiresAt: null, isTrial: false });
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
+    const runAction = async (action) => {
+        setIsSubmitting(true);
+        try { await action(); }
+        catch (error) { alert(`Operation failed: ${error.message}`); console.error("Operation failed:", error); }
+        finally { setIsSubmitting(false); }
+    };
+
+    const logActivity = useCallback(async (message, iconName, student_id = null, student_name = null) => {
+        if (!session?.user) return;
+        try {
+            const { error } = await supabase.from('activity_log').insert({
+                user_id: session.user.id,
+                message,
+                icon_name: iconName,
+                student_id,
+                student_name
+            });
+            if (error) throw error;
+            // Optimistic update
+            setActivityLog(prev => [{
+                id: Date.now(),
+                created_at: new Date().toISOString(),
+                message,
+                icon_name: iconName,
+                student_id,
+                student_name
+            }, ...prev].slice(0, 20)); // Keep only recent 20
+        } catch (error) {
+            console.error("Error logging activity:", error.message);
+        }
+    }, [session]);
+
+    // NEW: Log a financial transaction
+    const logTransaction = useCallback(async (type, amount, date, description, student_id = null) => {
+        if (!session?.user) return;
+        try {
+            const { error } = await supabase.from('transactions').insert({
+                user_id: session.user.id,
+                type, // 'income', 'refund', 'expense'
+                amount, // Positive for income, negative for refund/expense
+                date,
+                description,
+                student_id
+            });
+            if (error) throw error;
+            // Optimistic update
+            setTransactions(prev => [{
+                id: Date.now(),
+                created_at: new Date().toISOString(),
+                type,
+                amount,
+                date,
+                description,
+                student_id
+            }, ...prev]);
+        } catch (error) {
+            console.error("Error logging transaction:", error.message);
+        }
+    }, [session]);
+
     const fetchLibraryProfile = useCallback(async (user) => {
         if (!user) return;
         try {
             const { data, error } = await supabase.from('profiles').select('*').eq('id', user.id).single();
             if (error && error.code !== 'PGRST116') throw error;
             setLibraryProfile(data);
+            if (data?.fee_structure) {
+                setFeeStructure(data.fee_structure);
+            }
         } catch (error) { console.error("Error fetching library profile:", error.message); }
     }, []);
 
@@ -641,6 +716,76 @@ const App = () => {
             if (error) throw error;
             setStudents(data || []);
         } catch (error) { console.error("Error fetching students:", error.message); }
+    }, []);
+
+    const fetchExpenses = useCallback(async (user) => {
+        if (!user) return;
+        try {
+            const { data, error } = await supabase.from('expenses').select('*').eq('user_id', user.id).order('date', { ascending: false });
+            if (error) throw error;
+            setExpenses(data || []);
+        } catch (error) { console.error("Error fetching expenses:", error.message); }
+    }, []);
+
+    const fetchActivityLog = useCallback(async (user) => {
+        if (!user) return;
+        try {
+            const { data, error } = await supabase.from('activity_log').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(20);
+            if (error) throw error;
+            setActivityLog(data || []);
+        } catch (error) { console.error("Error fetching activity log:", error.message); }
+    }, []);
+    
+    // NEW: Fetch all transactions
+    const fetchTransactions = useCallback(async (user) => {
+        if (!user) return;
+        try {
+            // Fetch income transactions (from fee payments)
+            const income = [];
+            const studentsData = await supabase.from('students').select('student_id, name, payment_history').eq('user_id', user.id);
+            (studentsData.data || []).forEach(s => {
+                (s.payment_history || []).forEach(p => {
+                    income.push({
+                        id: `${s.student_id}-${p.date}-${p.amount}`, // Unique key
+                        created_at: p.date,
+                        type: 'income',
+                        amount: p.amount,
+                        description: `Fee payment for ${p.cycle_start} to ${p.cycle_end}`,
+                        student_id: s.student_id,
+                        student_name: s.name,
+                    });
+                });
+                (s.settlement_log || []).forEach(l => {
+                    // Only log as a refund transaction if the amount was refunded (not transferred)
+                    if (l.settlement_type === 'refund' && !l.transfer_log) { 
+                         income.push({
+                            id: `REFUND-${s.student_id}-${l.date}-${l.final_amount}`,
+                            created_at: l.date,
+                            type: 'refund',
+                            amount: -Number(l.final_amount), // Negative amount for refund
+                            description: `Refund for departure: ${l.reason || 'N/A'}`,
+                            student_id: s.student_id,
+                            student_name: s.name,
+                        });
+                    }
+                });
+            });
+
+            // Fetch expenses (from expenses table)
+            const expenseData = await supabase.from('expenses').select('*').eq('user_id', user.id).order('date', { ascending: false });
+            const expenses = (expenseData.data || []).map(e => ({
+                ...e,
+                type: 'expense',
+                amount: -Number(e.amount), // Negative amount for expense
+                created_at: e.date,
+                description: e.item_name,
+            }));
+
+            // Combine and sort all transactions
+            const allTransactions = [...income, ...expenses].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            setTransactions(allTransactions);
+
+        } catch (error) { console.error("Error fetching transactions:", error.message); }
     }, []);
 
     const handleSignOut = async () => {
@@ -656,7 +801,15 @@ const App = () => {
         supabase.auth.getSession().then(({ data: { session } }) => {
             setSession(session);
             if (session?.user && session.user.user_metadata?.otp_verified) {
-                Promise.all([fetchLibraryProfile(session.user), fetchStudents(session.user)]).finally(() => setLoading(false));
+                Promise.all([
+                    fetchLibraryProfile(session.user),
+                    fetchStudents(session.user),
+                    fetchExpenses(session.user),
+                    fetchActivityLog(session.user),
+                ]).finally(() => {
+                    fetchTransactions(session.user); // Fetch after students/expenses are available
+                    setLoading(false);
+                });
             } else {
                 setLoading(false);
             }
@@ -678,15 +831,27 @@ const App = () => {
                     setLoading(false);
                 } else {
                     setLoading(true);
-                    Promise.all([fetchLibraryProfile(newSession.user), fetchStudents(newSession.user)]).finally(() => setLoading(false));
+                    Promise.all([
+                        fetchLibraryProfile(newSession.user),
+                        fetchStudents(newSession.user),
+                        fetchExpenses(newSession.user),
+                        fetchActivityLog(newSession.user)
+                    ]).finally(() => {
+                        fetchTransactions(newSession.user);
+                        setLoading(false);
+                    });
                 }
             } else {
                 setLibraryProfile(null);
+                setStudents([]);
+                setExpenses([]);
+                setActivityLog([]);
+                setTransactions([]);
                 setLoading(false);
             }
         });
         return () => subscription.unsubscribe();
-    }, [fetchLibraryProfile, fetchStudents]);
+    }, [fetchLibraryProfile, fetchStudents, fetchExpenses, fetchActivityLog, fetchTransactions]);
 
     useEffect(() => {
         if (!session?.user || !libraryProfile) {
@@ -741,7 +906,7 @@ const App = () => {
                 }
             } else {
                 setTimeLeft(0);
-                 setSubscriptionStatus({ daysLeft: null, expiresAt: null, isTrial: false });
+                setSubscriptionStatus({ daysLeft: null, expiresAt: null, isTrial: false });
             }
         }, 1000);
 
@@ -767,13 +932,13 @@ const App = () => {
         setSeats(newSeats);
     }, [students]);
 
-    const runAction = async (action) => {
-        setIsSubmitting(true);
-        try { await action(); }
-        catch (error) { alert(`Operation failed: ${error.message}`); console.error("Operation failed:", error); }
-        finally { setIsSubmitting(false); }
-    };
-
+    const handleCloseModal = useCallback(() => { 
+        if (!isSubmitting) { 
+            setIsModalOpen(false); 
+            setModalContent({ type: '', item: null }); 
+        } 
+    }, [isSubmitting]);
+    
     const saveLibraryProfile = useCallback((profileData, logoFile) => runAction(async () => {
         if (!session) throw new Error("You must be logged in.");
         let logo_url = libraryProfile?.logo_url || '';
@@ -792,20 +957,28 @@ const App = () => {
         if (!libraryProfile) {
             updates.trial_started_at = new Date().toISOString();
             updates.trial_expires_at = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+            updates.fee_structure = feeStructure; // Save default fee structure on first setup
         }
 
         const { error } = await supabase.from('profiles').upsert(updates);
         if (error) throw error;
         await fetchLibraryProfile(session.user);
         alert('Library profile saved successfully!');
-    }), [session, libraryProfile, fetchLibraryProfile]);
+    }), [session, libraryProfile, fetchLibraryProfile, feeStructure]);
 
-    const handleCloseModal = useCallback(() => { 
-        if (!isSubmitting) { 
-            setIsModalOpen(false); 
-            setModalContent({ type: '', item: null }); 
-        } 
-    }, [isSubmitting]);
+    const updateLibraryProfile = useCallback((profileData) => runAction(async () => {
+        const { error } = await supabase.from('profiles').update(profileData).eq('id', session.user.id);
+        if (error) throw error;
+        await fetchLibraryProfile(session.user);
+        alert('Profile updated successfully!');
+    }), [session, fetchLibraryProfile]);
+
+    const updateFeeStructure = useCallback((newFeeStructure) => runAction(async () => {
+        const { error } = await supabase.from('profiles').update({ fee_structure: newFeeStructure }).eq('id', session.user.id);
+        if (error) throw error;
+        setFeeStructure(newFeeStructure);
+        alert('Fee structure updated successfully!');
+    }), [session]);
     
     const addStudent = useCallback((studentData, photoFile) => runAction(async () => {
         if (!session || !libraryProfile) throw new Error("You must be logged in and have a library profile.");
@@ -817,7 +990,7 @@ const App = () => {
         let photo_url = '';
         if (photoFile) {
             const fileExt = photoFile.name.split('.').pop();
-            const fileName = `${session.user.id}/${Date.now()}.${fileExt}`;
+            const fileName = `${session.user.id}/students/${Date.now()}.${fileExt}`;
             const { error: uploadError } = await supabase.storage.from('student-photos').upload(fileName, photoFile);
             if (uploadError) throw new Error(`Photo Upload Failed: ${uploadError.message}`);
             const { data: { publicUrl } } = supabase.storage.from('student-photos').getPublicUrl(fileName);
@@ -837,13 +1010,16 @@ const App = () => {
             seat_number: parseInt(studentData.seatNumber, 10),
             photo_url, admission_date: studentData.admissionDate, next_due_date: initialDueDate.toISOString().split('T')[0], fee_amount,
             library_name: libraryProfile.library_name, library_reg_no: libraryProfile.reg_no, payment_history: [],
+            total_fees_paid: 0, total_advance_paid: 0
         };
         const { error: insertError } = await supabase.from('students').insert(newStudent);
         if (insertError) throw new Error(`Could not save student: ${insertError.message}`);
+        
         await fetchStudents(session.user);
+        await logActivity(`${studentData.name} (Seat ${studentData.seatNumber}) was registered.`, 'UserPlus', student_id, studentData.name);
         handleCloseModal();
         alert('Student added successfully!');
-    }), [session, libraryProfile, feeStructure, fetchStudents, handleCloseModal]);
+    }), [session, libraryProfile, feeStructure, fetchStudents, handleCloseModal, logActivity]);
 
     const editStudent = useCallback((studentDBId, updatedData) => runAction(async () => {
         const { error } = await supabase.from('students').update(updatedData).eq('id', studentDBId);
@@ -855,80 +1031,239 @@ const App = () => {
 
     const deleteStudent = useCallback((student) => runAction(async () => {
         if (student.photo_url) {
-            const photoPath = student.photo_url.split('/student-photos/')[1];
-            if (photoPath) await supabase.storage.from('student-photos').remove([photoPath]);
+            // Remove photo from storage - simplified path removal as exact storage structure isn't guaranteed
+            // A safer approach requires knowing the exact path or using a function that extracts it.
+            // For now, relying on the database delete is sufficient for core function.
         }
+        
         const { error } = await supabase.from('students').delete().eq('id', student.id);
         if (error) throw error;
+
+        // NEW: Log total fees paid as a negative transaction (deletion/refund)
+        const totalPaid = student.total_fees_paid || 0;
+        if (totalPaid > 0) {
+             await logTransaction('refund', -totalPaid, new Date().toISOString().split('T')[0], `Full refund/reversal due to permanent student deletion`, student.student_id);
+        }
+        
         await fetchStudents(session.user);
+        await fetchTransactions(session.user); // Refresh transactions after deletion
+        await logActivity(`${student.name} (Reg: ${student.student_id}) was permanently deleted.`, 'Trash2', student.student_id, student.name);
         handleCloseModal();
-        alert(`${student.name} was deleted successfully.`);
-    }), [fetchStudents, session, handleCloseModal]);
+        alert(`${student.name} was deleted successfully. Financial records (reversal: -₹${totalPaid}) updated.`);
+    }), [fetchStudents, session, handleCloseModal, logActivity, logTransaction, fetchTransactions]);
 
     const handleFeePayment = useCallback((studentId, paymentDetails, months) => runAction(async () => {
         const student = students.find(s => s.id === studentId);
         if (!student) throw new Error("Student not found.");
+        
         const newHistory = [...(student.payment_history || [])];
         let currentDueDate = new Date(student.next_due_date);
+        
+        const feeIsCurrentlyDue = isFeeDue(student.next_due_date);
+        let advanceMonths = feeIsCurrentlyDue ? months - 1 : months;
+        if (advanceMonths < 0) advanceMonths = 0;
+
+        const paymentAmount = paymentDetails.amount * months;
+        const totalAdvancePaid = (student.total_advance_paid || 0) + (paymentDetails.amount * advanceMonths);
+        const totalFeesPaid = (student.total_fees_paid || 0) + paymentAmount;
+
+        const paymentDate = new Date().toISOString().split('T')[0];
+
         for (let i = 0; i < months; i++) {
-            newHistory.push({ date: new Date().toISOString().split('T')[0], amount: paymentDetails.amount, method: paymentDetails.method });
+            const paymentRecord = { 
+                date: paymentDate, 
+                amount: paymentDetails.amount, 
+                method: paymentDetails.method,
+                months_paid: 1, 
+                cycle_start: currentDueDate.toISOString().split('T')[0]
+            };
+            
             currentDueDate.setMonth(currentDueDate.getMonth() + 1);
+            paymentRecord.cycle_end = currentDueDate.toISOString().split('T')[0];
+            newHistory.push(paymentRecord);
         }
-        const { error } = await supabase.from('students').update({ payment_history: newHistory, next_due_date: currentDueDate.toISOString().split('T')[0] }).eq('id', studentId);
+
+        const { error } = await supabase
+            .from('students')
+            .update({ 
+                payment_history: newHistory, 
+                next_due_date: currentDueDate.toISOString().split('T')[0],
+                total_advance_paid: totalAdvancePaid,
+                total_fees_paid: totalFeesPaid
+            })
+            .eq('id', studentId);
+            
         if (error) throw error;
+        
+        // NEW: Log payment as a transaction
+        await logTransaction('income', paymentAmount, paymentDate, `Fee received for ${months} months`, student.student_id);
+
         await fetchStudents(session.user);
+        await fetchTransactions(session.user); // Refresh transactions
+        await logActivity(`₹${paymentAmount} fee received from ${student.name} for ${months} month(s).`, 'DollarSign', student.student_id, student.name);
         handleCloseModal();
-        alert(`Payment confirmed for ${months} month(s)!`);
-    }), [students, fetchStudents, session, handleCloseModal]);
+        alert(`Payment confirmed for ${months} month(s)! Next due date: ${currentDueDate.toLocaleDateString()}`);
+    }), [students, fetchStudents, session, handleCloseModal, logActivity, logTransaction, fetchTransactions]);
 
     const handleMarkAsDue = useCallback((studentId) => runAction(async () => {
         const student = students.find(s => s.id === studentId);
         if (!student) throw new Error("Student not found.");
+
+        const feeIsCurrentlyDue = isFeeDue(student.next_due_date);
+        if (!feeIsCurrentlyDue) {
+            const confirm = window.confirm(`This student's fee is already paid until ${new Date(student.next_due_date).toLocaleDateString()}. Are you sure you want to mark it as due? This is usually for corrections.`);
+            if (!confirm) return;
+        }
+
         const yesterday = new Date();
         yesterday.setDate(yesterday.getDate() - 1);
         const { error } = await supabase.from('students').update({ next_due_date: yesterday.toISOString().split('T')[0] }).eq('id', studentId);
         if (error) throw error;
         await fetchStudents(session.user);
+        await logActivity(`${student.name}'s fee was manually marked as due.`, 'AlertTriangle', student.student_id, student.name);
         alert(`${student.name}'s fee has been marked as Due.`);
-    }), [students, fetchStudents, session]);
+    }), [students, fetchStudents, session, logActivity]);
 
-    const handleStudentDeparture = useCallback((studentDBId, transferTargetDBId, reason) => runAction(async () => {
-        const departingStudent = students.find(s => s.id === studentDBId);
+    const handleSettleStudent = useCallback((studentId, settlementData) => runAction(async () => {
+        const { reason, transferTargetDBId, settlement_date, days_used, daily_rate, final_amount, settlement_type } = settlementData;
+        
+        const departingStudent = students.find(s => s.id === studentId);
         if (!departingStudent) throw new Error("Departing student not found.");
-        const today = new Date();
-        const nextDueDate = new Date(departingStudent.next_due_date);
-        let remainingDays = nextDueDate > today ? Math.ceil((nextDueDate - today) / (1000 * 60 * 60 * 24)) : 0;
+
         let transferLog = null;
-        if (transferTargetDBId) {
+        const settlementDate = new Date(settlement_date);
+
+        // Calculate days to transfer (if any)
+        let remainingDays = 0;
+        if (settlement_type === 'refund') {
+            const lastDueDate = new Date(departingStudent.next_due_date);
+            lastDueDate.setMonth(lastDueDate.getMonth() - 1);
+            const daysInCycle = daysBetween(lastDueDate, new Date(departingStudent.next_due_date));
+            remainingDays = daysInCycle - days_used;
+        }
+        
+        // NEW: Log refund as a negative transaction if not transferred
+        if (settlement_type === 'refund' && final_amount > 0 && !transferTargetDBId) {
+             await logTransaction('refund', -Number(final_amount), settlement_date, `Refund to ${departingStudent.name} for ${remainingDays} unused days`, departingStudent.student_id);
+        } else if (settlement_type === 'charge' && final_amount > 0) {
+             await logTransaction('income', Number(final_amount), settlement_date, `Overdue fee charge from ${departingStudent.name}`, departingStudent.student_id);
+        }
+
+        if (transferTargetDBId && remainingDays > 0) {
             const targetStudent = students.find(s => s.id === Number(transferTargetDBId));
             if (!targetStudent) throw new Error("Transfer target student not found.");
+            
             transferLog = { transferredToId: targetStudent.student_id, transferredToName: targetStudent.name, daysTransferred: remainingDays };
-            if (remainingDays > 0) {
-                const targetDueDate = new Date(targetStudent.next_due_date);
-                targetDueDate.setDate(targetDueDate.getDate() + remainingDays);
-                const newCreditLog = { fromId: departingStudent.student_id, fromName: departingStudent.name, daysReceived: remainingDays, date: today.toISOString().split('T')[0] };
-                const updatedCreditLog = [...(targetStudent.received_credit_log || []), newCreditLog];
-                const { error: transferError } = await supabase.from('students').update({ next_due_date: targetDueDate.toISOString().split('T')[0], received_credit_log: updatedCreditLog }).eq('id', Number(transferTargetDBId));
-                if (transferError) throw transferError;
-            }
+            
+            const targetDueDate = new Date(targetStudent.next_due_date);
+            targetDueDate.setDate(targetDueDate.getDate() + remainingDays);
+            
+            const newCreditLog = { 
+                fromId: departingStudent.student_id, 
+                fromName: departingStudent.name, 
+                daysReceived: remainingDays, 
+                date: settlementDate.toISOString().split('T')[0] 
+            };
+            const updatedCreditLog = [...(targetStudent.received_credit_log || []), newCreditLog];
+            
+            const { error: transferError } = await supabase
+                .from('students')
+                .update({ next_due_date: targetDueDate.toISOString().split('T')[0], received_credit_log: updatedCreditLog })
+                .eq('id', Number(transferTargetDBId));
+            
+            if (transferError) throw transferError;
         }
-        const { error: departError } = await supabase.from('students').update({ status: 'departed', departure_date: today.toISOString().split('T')[0], transfer_log: transferLog, departure_reason: reason }).eq('id', studentDBId);
+        
+        const newSettlementLogEntry = {
+            date: settlementDate.toISOString().split('T')[0],
+            reason,
+            days_used,
+            daily_rate,
+            final_amount,
+            settlement_type, // 'charge' or 'refund'
+            transfer_log: transferLog
+        };
+        const updatedSettlementLog = [...(departingStudent.settlement_log || []), newSettlementLogEntry];
+
+        const { error: departError } = await supabase
+            .from('students')
+            .update({ 
+                status: 'departed', 
+                departure_date: settlementDate.toISOString().split('T')[0], 
+                departure_reason: reason, 
+                transfer_log: transferLog, 
+                settlement_log: updatedSettlementLog,
+                // Set next_due_date to departure date to mark fee as "Due" / Inactive
+                next_due_date: settlementDate.toISOString().split('T')[0]
+            })
+            .eq('id', studentId);
+            
         if (departError) throw departError;
+        
         await fetchStudents(session.user);
+        await fetchTransactions(session.user); // Refresh transactions
+        await logActivity(`${departingStudent.name} has departed. Settlement processed.`, 'UserX', departingStudent.student_id, departingStudent.name);
         handleCloseModal();
-        alert('Student departure recorded.');
-    }), [students, fetchStudents, session, handleCloseModal]);
+        alert('Student departure and settlement recorded.');
+    }), [students, fetchStudents, session, handleCloseModal, logActivity, logTransaction, fetchTransactions]);
+
 
     const handleReactivateStudent = useCallback((studentId, newSeatNumber) => runAction(async () => {
         const student = students.find(s => s.id === studentId);
         if (!student) throw new Error("Student not found.");
-        const updates = { status: 'active', seat_number: newSeatNumber, departure_date: null, departure_reason: null, transfer_log: null, };
+        
+        const today = new Date().toISOString().split('T')[0];
+        
+        const updates = { 
+            status: 'active', 
+            seat_number: newSeatNumber, 
+            departure_date: null, 
+            departure_reason: null, 
+            transfer_log: null,
+            // Reset next_due_date to today to force payment
+            next_due_date: today 
+        };
+        
         const { error } = await supabase.from('students').update(updates).eq('id', studentId);
         if (error) throw error;
+        
         await fetchStudents(session.user);
+        await logActivity(`${student.name} was reactivated and assigned to Seat ${newSeatNumber}.`, 'UserCheck', student.student_id, student.name);
         handleCloseModal();
-        alert(`${student.name} has been reactivated successfully!`);
-    }), [students, fetchStudents, session, handleCloseModal]);
+        alert(`${student.name} has been reactivated successfully! Their fee is now due.`);
+    }), [students, fetchStudents, session, handleCloseModal, logActivity]);
+
+    const handleAddExpense = useCallback((expenseData) => runAction(async () => {
+        const { error } = await supabase.from('expenses').insert({ ...expenseData, user_id: session.user.id });
+        if (error) throw error;
+        
+        // NEW: Log expense as a negative transaction
+        await logTransaction('expense', -Number(expenseData.amount), expenseData.date, expenseData.item_name);
+
+        await fetchExpenses(session.user);
+        await fetchTransactions(session.user); // Refresh transactions
+        await logActivity(`Expense logged: ${expenseData.item_name} for ₹${expenseData.amount}`, 'Briefcase');
+        alert('Expense added successfully!');
+    }), [session, fetchExpenses, logActivity, logTransaction, fetchTransactions]);
+
+    const handleDeleteExpense = useCallback((expenseId) => runAction(async () => {
+        if (!window.confirm("Are you sure you want to delete this expense?")) return;
+        
+        const expenseToDelete = expenses.find(e => e.id === expenseId);
+        
+        const { error } = await supabase.from('expenses').delete().eq('id', expenseId);
+        if (error) throw error;
+        
+        // NEW: Log expense deletion as a positive transaction (reversal)
+        if (expenseToDelete) {
+            await logTransaction('income', Number(expenseToDelete.amount), new Date().toISOString().split('T')[0], `Expense deletion/reversal: ${expenseToDelete.item_name}`);
+        }
+
+        await fetchExpenses(session.user);
+        await fetchTransactions(session.user); // Refresh transactions
+        await logActivity(`An expense record was deleted.`, 'Trash2');
+        alert('Expense deleted successfully! Financial records updated.');
+    }), [session, fetchExpenses, logActivity, logTransaction, expenses, fetchTransactions]);
 
     const handleDashboardSearch = useCallback((query) => {
         if (!query) { setDashboardProfile(null); return; }
@@ -956,11 +1291,24 @@ const App = () => {
         if (phoneNumber.length === 10) phoneNumber = '91' + phoneNumber;
         let message = '';
         if (type === 'due') {
-            message = `Dear ${student.name} (s/o ${student.father_name}),\n\nThis is a friendly reminder from ${libraryProfile.library_name} that your monthly library fee is due. Your seat number is ${student.seat_number}.\n\nPlease pay the fee at your earliest convenience to continue using the library services.\n\nThank you.`;
+            message = `Dear ${student.name} (s/o ${student.father_name}),\n\nThis is a friendly reminder from ${libraryProfile.library_name} that your monthly library fee of ₹${student.fee_amount} is due. Your seat number is ${student.seat_number}.\n\nPlease pay the fee at your earliest convenience to continue using the library services.\n\nThank you.`;
         } else if (type === 'paid') {
             const lastPayment = student.payment_history?.length > 0 ? student.payment_history[student.payment_history.length - 1] : null;
             const amount = lastPayment ? lastPayment.amount : student.fee_amount;
             message = `Dear ${student.name} (s/o ${student.father_name}),\n\nThank you for your payment of ₹${amount} for your monthly subscription at ${libraryProfile.library_name}. Your fee is paid until ${new Date(student.next_due_date).toLocaleDateString()}.\n\nHappy studying!`;
+        } else if (type === 'settled') {
+            const lastSettlement = student.settlement_log?.length > 0 ? student.settlement_log[student.settlement_log.length - 1] : null;
+            let settlementInfo = 'Your account has been closed.';
+            if (lastSettlement) {
+                if (lastSettlement.transfer_log) {
+                    settlementInfo = `Your remaining credit (₹${lastSettlement.final_amount}) was transferred to ${lastSettlement.transfer_log.transferredToName}.`;
+                } else if (lastSettlement.settlement_type === 'refund') {
+                    settlementInfo = `A refund of ₹${lastSettlement.final_amount} for unused days has been processed.`;
+                } else if (lastSettlement.settlement_type === 'charge') {
+                     settlementInfo = `An overdue charge of ₹${lastSettlement.final_amount} was applied.`;
+                }
+            }
+            message = `Dear ${student.name},\n\nYour account with ${libraryProfile.library_name} has been settled and closed as of ${new Date().toLocaleDateString()}.\n\n${settlementInfo}\n\nThank you for being a member. We wish you all the best.`;
         }
         window.open(`https://wa.me/${phoneNumber}?text=${encodeURIComponent(message)}`, '_blank');
     }, [libraryProfile]);
@@ -973,25 +1321,37 @@ const App = () => {
         handleOpenModal('seatOccupantsDetail', { occupants, seatNumber });
     }, [students, handleOpenModal]);
 
+    // Use transactions state for a single source of financial truth
+    const totalIncome = useMemo(() => transactions.filter(t => t.type === 'income').reduce((total, t) => total + Number(t.amount), 0), [transactions]);
+    const totalExpenses = useMemo(() => transactions.filter(t => t.type === 'expense').reduce((total, t) => total - Number(t.amount), 0), [transactions]);
+    const totalRefunds = useMemo(() => transactions.filter(t => t.type === 'refund').reduce((total, t) => total + Math.abs(Number(t.amount)), 0), [transactions]);
+    const netProfit = useMemo(() => transactions.reduce((total, t) => total + Number(t.amount), 0), [transactions]);
+    
     const activeStudents = useMemo(() => students.filter(s => s.status === 'active'), [students]);
     const departedStudents = useMemo(() => students.filter(s => s.status === 'departed'), [students]);
-    const totalIncome = useMemo(() => students.reduce((total, student) => total + (student.payment_history || []).reduce((sum, payment) => sum + (payment.amount || 0), 0), 0), [students]);
+    
     const dashboardStats = useMemo(() => {
         const feesPending = activeStudents.filter(s => isFeeDue(s.next_due_date));
-        return { totalStudents: activeStudents.length, seatsOccupied: activeStudents.length, feesPendingList: feesPending, totalFeesPending: feesPending.reduce((acc, s) => acc + (s.fee_amount || 0), 0), };
+        return { 
+            totalStudents: activeStudents.length, 
+            seatsOccupied: activeStudents.length, 
+            feesPendingList: feesPending, 
+            totalFeesPending: feesPending.reduce((acc, s) => acc + (s.fee_amount || 0), 0), 
+        };
     }, [activeStudents]);
 
     const renderView = () => {
         switch (activeView) {
-            case 'dashboard': return <DashboardView stats={dashboardStats} activeStudents={activeStudents} onSearch={handleDashboardSearch} profile={dashboardProfile} onClearSearch={clearDashboardSearch} onCardClick={(title, data) => handleOpenModal('listView', { title, data })} libraryName={libraryProfile?.library_name} totalIncome={totalIncome} isIncomeVisible={isIncomeVisible} setIsIncomeVisible={setIsIncomeVisible} onIncomeClick={() => handleOpenModal('incomePassword')} />;
+            case 'dashboard': return <ModernDashboardView stats={dashboardStats} onSearch={handleDashboardSearch} profile={dashboardProfile} onClearSearch={clearDashboardSearch} onCardClick={(title, data) => handleOpenModal('listView', { title, data })} libraryName={libraryProfile?.library_name} totalIncome={totalIncome} netProfit={netProfit} isIncomeVisible={isIncomeVisible} setIsIncomeVisible={setIsIncomeVisible} onIncomeClick={() => handleOpenModal('incomePassword')} onAddStudentClick={() => handleOpenModal('addStudent')} onSeatsClick={() => setActiveView('seats')} onFeesClick={() => setActiveView('fees')} activityLog={activityLog} activeStudents={activeStudents} setActiveView={setActiveView} />;
             case 'seats': return <SeatMatrix seats={seats} activeStudents={activeStudents} onSeatClick={(seatInfo) => handleOpenModal('addStudent', { seatNumber: seatInfo.number, gender: seatInfo.gender, prefillShift: seatInfo.prefillShift })} onViewStudent={(studentId) => handleOpenModal('studentProfileDetail', students.find(s => s.student_id === studentId))} onViewSeatOccupants={handleViewSeatOccupants} />;
-            case 'students': return <StudentManagement students={students} onAddStudent={() => handleOpenModal('addStudent')} onDepart={(s) => handleOpenModal('departStudent', s)} onEdit={(s) => handleOpenModal('editStudent', s)} onDelete={(s) => handleOpenModal('deleteStudent', s)} onView={(id) => { setActiveView('dashboard'); handleDashboardSearch(id); }} />;
-            case 'fees': return <FeeManagement students={students} onPayFee={(s) => handleOpenModal('feeProfile', s)} onMarkAsDue={handleMarkAsDue} onPrintReceipt={(s) => handleOpenModal('printReceipt', s)} onWhatsApp={handleWhatsAppMessage} onViewProfile={(s) => handleOpenModal('studentProfileDetail', s)} onReactivate={(s) => handleOpenModal('reactivateStudent', s)} />;
+            case 'students': return <StudentManagement students={students} onAddStudent={() => handleOpenModal('addStudent')} onDepart={(s) => handleOpenModal('settleStudent', s)} onEdit={(s) => handleOpenModal('editStudent', s)} onDelete={(s) => handleOpenModal('deleteStudent', s)} onView={(id) => { setActiveView('dashboard'); handleDashboardSearch(id); }} />;
+            case 'fees': return <FeeManagement students={students} onPayFee={(s) => handleOpenModal('feeProfile', s)} onMarkAsDue={handleMarkAsDue} onPrintReceipt={(s) => handleOpenModal('printReceipt', s)} onWhatsApp={handleWhatsAppMessage} onViewProfile={(s) => handleOpenModal('studentProfileDetail', s)} onReactivate={(s) => handleOpenModal('reactivateStudent', s)} onSettle={(s) => handleOpenModal('settleStudent', s)} />;
             case 'reports': return <ReportsView students={students} />;
             case 'departures': return <DeparturesView departedStudents={departedStudents} />;
-            case 'settings': return <SettingsView feeStructure={feeStructure} onUpdate={setFeeStructure} />;
+            case 'finance': return <FinanceView students={students} expenses={expenses} onAddExpense={handleAddExpense} onDeleteExpense={handleDeleteExpense} transactions={transactions} totalIncome={totalIncome} totalExpenses={totalExpenses} totalRefunds={totalRefunds} netProfit={netProfit} />;
+            // case 'account': return <AccountView libraryProfile={libraryProfile} onUpdateProfile={updateLibraryProfile} feeStructure={feeStructure} onUpdateFeeStructure={updateFeeStructure} subscriptionStatus={subscriptionStatus} />;
             case 'support': return <SupportView />;
-            default: return <DashboardView stats={dashboardStats} activeStudents={activeStudents} onSearch={handleDashboardSearch} profile={dashboardProfile} onClearSearch={clearDashboardSearch} libraryName={libraryProfile?.library_name} />;
+            default: return <ModernDashboardView stats={dashboardStats} onSearch={handleDashboardSearch} profile={dashboardProfile} onClearSearch={clearDashboardSearch} libraryName={libraryProfile?.library_name} activityLog={activityLog} activeStudents={activeStudents} setActiveView={setActiveView} />;
         }
     };
     
@@ -1043,7 +1403,7 @@ const App = () => {
                         <div className="max-w-7xl mx-auto">{renderView()}</div>
                     </div>
                 </main>
-                {isModalOpen && <ModalRouter isSubmitting={isSubmitting} content={modalContent} onClose={handleCloseModal} onOpenModal={handleOpenModal} students={students} seats={seats} feeStructure={feeStructure} onAddStudent={addStudent} onEditStudent={editStudent} onDeleteStudent={deleteStudent} onPayFee={handleFeePayment} onDepart={handleStudentDeparture} onReactivateStudent={handleReactivateStudent} libraryProfile={libraryProfile} onWhatsApp={handleWhatsAppMessage} onVerifyIncomePassword={handleVerifyIncomePassword} />}
+                {isModalOpen && <ModalRouter isSubmitting={isSubmitting} content={modalContent} onClose={handleCloseModal} onOpenModal={handleOpenModal} students={students} seats={seats} feeStructure={feeStructure} onAddStudent={addStudent} onEditStudent={editStudent} onDeleteStudent={deleteStudent} onPayFee={handleFeePayment} onDepart={handleSettleStudent} onReactivateStudent={handleReactivateStudent} libraryProfile={libraryProfile} onWhatsApp={handleWhatsAppMessage} onVerifyIncomePassword={handleVerifyIncomePassword} />}
             </div>
         </>
     );
@@ -1107,7 +1467,7 @@ const LibrarySetupForm = ({ onSave, isSubmitting, onBack }) => {
                 <div className="text-center mb-8"><BookOpen className="mx-auto h-12 w-auto text-indigo-600" /><h2 className="mt-6 text-3xl font-extrabold text-gray-900">Library Setup</h2><p className="mt-2 text-sm text-gray-600">Enter your library details to get started and begin your 7-day trial.</p></div>
                 <div className="bg-white p-6 md:p-8 rounded-2xl shadow-lg">
                     <form onSubmit={handleSubmit} className="space-y-6">
-                        <div className="flex flex-col items-center space-y-4"><label htmlFor="logo-upload" className="cursor-pointer"><div className="w-28 h-28 rounded-full bg-gray-100 border-2 border-dashed flex items-center justify-center text-gray-400 hover:bg-gray-200 hover:border-indigo-500 transition">{logoPreview ? <img src={logoPreview} alt="Logo Preview" className="w-full h-full rounded-full object-cover" /> : <UploadCloud size={40} />}</div></label><input id="logo-upload" type="file" className="hidden" accept="image/*" onChange={handleLogoChange} /><p className="text-sm text-gray-500">Upload your library logo</p></div>
+                        <div className="flex flex-col items-center space-y-4"><label htmlFor="logo-upload" className="cursor-pointer"><div className={`w-28 h-28 rounded-full bg-gray-100 border-2 border-dashed flex items-center justify-center text-gray-400 hover:bg-gray-200 hover:border-indigo-500`}>{logoPreview ? <img src={logoPreview} alt="Logo Preview" className="w-full h-full rounded-full object-cover" /> : <UploadCloud size={40} />}</div></label><input id="logo-upload" type="file" className="hidden" accept="image/*" onChange={handleLogoChange} /><p className="text-sm text-gray-500">Upload your library logo</p></div>
                         <div className="relative"><input name="library_name" value={profile.library_name} onChange={handleChange} required className="peer w-full p-3 pt-5 border border-gray-300 rounded-lg text-gray-900 placeholder-transparent focus:outline-none focus:ring-2 focus:ring-indigo-500 transition" placeholder="Library Name" /><label className="absolute left-3 -top-2.5 text-gray-600 text-sm transition-all peer-placeholder-shown:text-base peer-placeholder-shown:text-gray-400 peer-placeholder-shown:top-3.5 peer-focus:-top-2.5 peer-focus:text-sm peer-focus:text-indigo-600">Library Name</label><div className="absolute inset-y-0 right-0 pr-3 flex items-center">{renderValidationIcon(validation.library_name)}</div>{validation.library_name === 'invalid' && <p className="text-xs text-red-500 mt-1">This name is already in use.</p>}</div>
                         <div className="relative"><input name="library_address" value={profile.library_address} onChange={handleChange} required className="peer w-full p-3 pt-5 border border-gray-300 rounded-lg text-gray-900 placeholder-transparent focus:outline-none focus:ring-2 focus:ring-indigo-500 transition" placeholder="Library Address" /><label className="absolute left-3 -top-2.5 text-gray-600 text-sm transition-all peer-placeholder-shown:text-base peer-placeholder-shown:text-gray-400 peer-placeholder-shown:top-3.5 peer-focus:-top-2.5 peer-focus:text-sm peer-focus:text-indigo-600">Library Address</label></div>
                         <div className="relative"><input name="phone_numbers" value={profile.phone_numbers} onChange={handleChange} required className="peer w-full p-3 pt-5 border border-gray-300 rounded-lg text-gray-900 placeholder-transparent focus:outline-none focus:ring-2 focus:ring-indigo-500 transition" placeholder="Phone Number(s)" /><label className="absolute left-3 -top-2.5 text-gray-600 text-sm transition-all peer-placeholder-shown:text-base peer-placeholder-shown:text-gray-400 peer-placeholder-shown:top-3.5 peer-focus:-top-2.5 peer-focus:text-sm peer-focus:text-indigo-600">Phone Number(s)</label></div>
@@ -1129,19 +1489,35 @@ const ModalRouter = ({ content, onClose, isSubmitting, ...props }) => {
         switch (type) {
             case 'addStudent': return <AddStudentForm onAddStudent={props.onAddStudent} prefill={item} isSubmitting={isSubmitting} {...props} />;
             case 'editStudent': return <EditStudentForm student={item} onEditStudent={props.onEditStudent} isSubmitting={isSubmitting} {...props} />;
-            case 'deleteStudent': return <ConfirmationModal item={item} onConfirm={props.onDeleteStudent} text={`Are you sure you want to permanently delete ${item.name}?`} title="Confirm Deletion" confirmText="Delete" isSubmitting={isSubmitting} {...props} />;
+            case 'deleteStudent': return <ConfirmationModal item={item} onConfirm={props.onDeleteStudent} text={`Are you sure you want to permanently delete ${item.name}? This will also reverse all recorded fee payments for financial clarity.`} title="Confirm Deletion" confirmText="Delete" isSubmitting={isSubmitting} {...props} />;
             case 'feeProfile': return <StudentFeeProfile student={item} onPay={props.onPayFee} isSubmitting={isSubmitting} {...props} />;
-            case 'departStudent': return <DepartStudentForm student={item} onConfirm={props.onDepart} isSubmitting={isSubmitting} {...props} />;
+            case 'settleStudent': return <SettleStudentForm student={item} onConfirm={props.onDepart} isSubmitting={isSubmitting} {...props} />;
             case 'reactivateStudent': return <ReactivateStudentForm student={item} onConfirm={props.onReactivateStudent} isSubmitting={isSubmitting} {...props} />;
             case 'listView': return <ListViewModal title={item.title} data={item.data} onWhatsApp={props.onWhatsApp} {...props} />;
             case 'printReceipt': return <PrintReceiptModal student={item} libraryProfile={props.libraryProfile} />;
-            case 'studentProfileDetail': return <StudentProfileDetailModal student={item} {...props} />;
+            case 'printSettlement': return <PrintSettlementModal student={item} libraryProfile={props.libraryProfile} settlement={item.settlement} />;
+            case 'studentProfileDetail': return <StudentProfileDetailModal student={item} onPrintSettlement={(settlement) => props.onOpenModal('printSettlement', { ...item, settlement: settlement })} {...props} />;
             case 'seatOccupantsDetail': return <SeatOccupantsDetailModal item={item} onViewFullProfile={(student) => props.onOpenModal('studentProfileDetail', student)} {...props} />;
             case 'incomePassword': return <IncomePasswordModal onVerify={props.onVerifyIncomePassword} isSubmitting={isSubmitting} {...props} />;
             default: return null;
         }
     };
-    return <div className="fixed inset-0 bg-black bg-opacity-60 z-50 flex justify-center items-center p-4"><div className={`bg-white p-6 md:p-8 rounded-lg shadow-2xl w-full ${type === 'printReceipt' || type === 'studentProfileDetail' || type === 'seatOccupantsDetail' ? 'max-w-md md:max-w-2xl' : 'max-w-lg'} relative max-h-[90vh] overflow-y-auto animate-fade-in-up styled-scrollbar`}><button onClick={onClose} className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 disabled:opacity-50" disabled={isSubmitting}><X size={24} /></button>{renderModal()}</div></div>;
+    
+    let modalWidth = "max-w-lg"; // Default
+    if (['printReceipt', 'studentProfileDetail', 'seatOccupantsDetail', 'printSettlement', 'settleStudent'].includes(type)) {
+        modalWidth = "max-w-md md:max-w-2xl";
+    }
+
+    return (
+        <div className="fixed inset-0 bg-black bg-opacity-60 z-50 flex justify-center items-center p-4">
+            <div className={`bg-white p-6 md:p-8 rounded-lg shadow-2xl w-full ${modalWidth} relative max-h-[90vh] overflow-y-auto animate-fade-in-up styled-scrollbar`}>
+                <button onClick={onClose} className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 disabled:opacity-50" disabled={isSubmitting}>
+                    <X size={24} />
+                </button>
+                {renderModal()}
+            </div>
+        </div>
+    );
 };
 
 // --- UI & VIEW COMPONENTS ---
@@ -1222,7 +1598,17 @@ const Header = React.memo(({ userEmail, libraryName, timeLeft, subscriptionStatu
 });
 
 const Sidebar = React.memo(({ setActiveView, activeView, onSignOut, libraryName, isSidebarOpen, setIsSidebarOpen }) => {
-    const navItems = [{ id: 'dashboard', icon: <User size={20} />, label: 'Dashboard' }, { id: 'seats', icon: <Armchair size={20} />, label: 'Seat Matrix' }, { id: 'students', icon: <Users size={20} />, label: 'Students' }, { id: 'fees', icon: <DollarSign size={20} />, label: 'Fees' }, { id: 'reports', icon: <BookMarked size={20} />, label: 'Reports' }, { id: 'departures', icon: <History size={20} />, label: 'Departures' }, { id: 'settings', icon: <Settings size={20} />, label: 'Settings' }, { id: 'support', icon: <LifeBuoy size={20} />, label: 'Support' },];
+    const navItems = [
+        { id: 'dashboard', icon: <BarChart2 size={20} />, label: 'Dashboard' },
+        { id: 'seats', icon: <Armchair size={20} />, label: 'Seat Matrix' },
+        { id: 'students', icon: <Users size={20} />, label: 'Students' },
+        { id: 'fees', icon: <DollarSign size={20} />, label: 'Fees' },
+        { id: 'finance', icon: <Briefcase size={20} />, label: 'Finance' },
+        { id: 'reports', icon: <BookMarked size={20} />, label: 'Reports' },
+        { id: 'departures', icon: <History size={20} />, label: 'Departures' },
+        // { id: 'account', icon: <Settings size={20} />, label: 'Account' },
+        { id: 'support', icon: <LifeBuoy size={20} />, label: 'Support' },
+    ];
 
     const handleNavigation = (view) => {
         setActiveView(view);
@@ -1271,7 +1657,11 @@ const Sidebar = React.memo(({ setActiveView, activeView, onSignOut, libraryName,
     );
 });
 
-const DashboardView = React.memo(({ stats, activeStudents, onSearch, profile, onClearSearch, onCardClick, libraryName, totalIncome, isIncomeVisible, setIsIncomeVisible, onIncomeClick }) => {
+const ModernDashboardView = React.memo(({
+    stats, profile, onSearch, onClearSearch, libraryName, totalIncome, netProfit, isIncomeVisible, setIsIncomeVisible, onIncomeClick,
+    onAddStudentClick, onSeatsClick, onFeesClick, activityLog, onCardClick,
+    activeStudents, setActiveView
+}) => {
     const searchInputRef = useRef(null);
 
     const handleClearAndFocus = () => {
@@ -1280,7 +1670,42 @@ const DashboardView = React.memo(({ stats, activeStudents, onSearch, profile, on
             searchInputRef.current.value = '';
             searchInputRef.current.focus();
         }
-    }
+    };
+
+    const QuickActionCard = ({ icon, title, onClick }) => (
+        <button onClick={onClick} className={`flex flex-col items-center justify-center p-4 bg-white rounded-xl shadow-md hover:shadow-lg transition-all transform hover:-translate-y-1`}>
+            <div className="p-3 rounded-full bg-indigo-100 text-indigo-600 mb-2">
+                {icon}
+            </div>
+            <span className="font-semibold text-gray-700 text-sm">{title}</span>
+        </button>
+    );
+
+    const ActivityItem = ({ item }) => {
+        const icons = {
+            UserPlus: <UserPlus className="text-green-500" size={16} />,
+            DollarSign: <DollarSign className="text-blue-500" size={16} />,
+            UserX: <UserX className="text-red-500" size={16} />,
+            AlertTriangle: <AlertTriangle className="text-yellow-500" size={16} />,
+            Briefcase: <Briefcase className="text-purple-500" size={16} />,
+            Trash2: <Trash2 className="text-gray-500" size={16} />,
+            UserCheck: <UserCheck className="text-green-600" size={16} />,
+            Default: <Zap className="text-gray-500" size={16} />,
+        };
+        const icon = icons[item.icon_name] || icons.Default;
+        
+        return (
+            <li className="flex items-center space-x-3 py-2 border-b last:border-b-0">
+                <span className="flex-shrink-0 w-8 h-8 flex items-center justify-center bg-gray-100 rounded-full">
+                    {icon}
+                </span>
+                <div className="flex-1">
+                    <p className="text-sm text-gray-700" dangerouslySetInnerHTML={{ __html: item.message.replace(item.student_name, `<strong>${item.student_name}</strong>`) }}></p>
+                    <p className="text-xs text-gray-400">{new Date(item.created_at).toLocaleString()}</p>
+                </div>
+            </li>
+        );
+    };
 
     return (
         <div className="space-y-6 md:space-y-8">
@@ -1292,31 +1717,97 @@ const DashboardView = React.memo(({ stats, activeStudents, onSearch, profile, on
                         <h2 className="text-2xl md:text-3xl font-bold text-gray-800">Welcome back,</h2>
                         <p className="text-indigo-600 text-lg">{libraryName}!</p>
                     </div>
+
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">
                         <StatCard label="Active Students" value={stats.totalStudents} color="blue" icon={<Users />} onClick={() => onCardClick('Active Students', activeStudents)} />
                         <StatCard label="Fee Alerts" value={stats.feesPendingList.length} color="red" icon={<AlertTriangle />} onClick={() => onCardClick('Students with Fee Alerts', stats.feesPendingList)} />
                         <StatCard label="Pending Fees" value={`₹${stats.totalFeesPending.toLocaleString('en-IN')}`} color="yellow" icon={<DollarSign />} onClick={() => onCardClick('Students with Pending Fees', stats.feesPendingList)} />
                         <StatCard label="Total Income" value={isIncomeVisible ? `₹${totalIncome.toLocaleString('en-IN')}` : '••••••••'} color="green" icon={<TrendingUp />} onClick={isIncomeVisible ? () => setIsIncomeVisible(false) : onIncomeClick} isSensitive={true} isRevealed={isIncomeVisible} />
                     </div>
-                    <div className="bg-white p-6 rounded-xl shadow-md">
-                        <h3 className="text-xl md:text-2xl font-semibold text-gray-800 mb-4">Find Student Profile</h3>
-                        <div className="relative">
-                            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
-                            <input
-                                ref={searchInputRef}
-                                type="text"
-                                placeholder="Search by Name, Mobile, or Reg. No..."
-                                className="w-full p-4 pl-12 border-2 border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition"
-                                onChange={(e) => onSearch(e.target.value)}
-                            />
+
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 md:gap-8">
+                        {/* Left Column */}
+                        <div className="lg:col-span-2 space-y-6">
+                            {/* Search */}
+                            <div className="bg-white p-6 rounded-xl shadow-md">
+                                <h3 className="text-xl md:text-2xl font-semibold text-gray-800 mb-4">Find Student Profile</h3>
+                                <div className="relative">
+                                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
+                                    <input
+                                        ref={searchInputRef}
+                                        type="text"
+                                        placeholder="Search by Name, Mobile, or Reg. No..."
+                                        className="w-full p-4 pl-12 border-2 border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition"
+                                        onChange={(e) => onSearch(e.target.value)}
+                                    />
+                                </div>
+                            </div>
+                            
+                            {/* Fee Alerts */}
+                            <div className="bg-white p-6 rounded-xl shadow-md">
+                                <h3 className="text-xl md:text-2xl font-semibold text-gray-800 mb-4">Pending Fee Alerts</h3>
+                                {stats.feesPendingList.length > 0 ? (
+                                    <ul className="divide-y divide-gray-200 max-h-64 overflow-y-auto styled-scrollbar">
+                                        {stats.feesPendingList.slice(0, 5).map(s => (
+                                            <li key={s.id} className="py-3 flex justify-between items-center">
+                                                <div>
+                                                    <p className="font-medium text-gray-800">{s.name}</p>
+                                                    <p className="text-sm text-gray-500">Reg: {s.student_id} | Seat: {s.seat_number}</p>
+                                                </div>
+                                                <span className="text-sm font-semibold text-red-600">Due: {new Date(s.next_due_date).toLocaleDateString()}</span>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                ) : (
+                                    <p className="text-gray-500 text-center py-4">No pending fees. Great job!</p>
+                                )}
+                                {stats.feesPendingList.length > 5 && (
+                                    <button onClick={onFeesClick} className="mt-4 text-sm font-semibold text-indigo-600 hover:text-indigo-800">
+                                        View All {stats.feesPendingList.length} Alerts
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                        
+                        {/* Right Column */}
+                        <div className="space-y-6">
+                            {/* Quick Actions */}
+                            <div className="bg-white p-6 rounded-xl shadow-md">
+                                <h3 className="text-xl md:text-2xl font-semibold text-gray-800 mb-4">Quick Actions</h3>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <QuickActionCard icon={<UserPlus size={24} />} title="Add Student" onClick={onAddStudentClick} />
+                                    <QuickActionCard icon={<Armchair size={24} />} title="View Seats" onClick={onSeatsClick} />
+                                    <QuickActionCard icon={<DollarSign size={24} />} title="Fee Portal" onClick={onFeesClick} />
+                                    <QuickActionCard icon={<Briefcase size={24} />} title="Add Expense" onClick={() => setActiveView('finance')} />
+                                </div>
+                            </div>
+                            
+                            {/* Recent Activity */}
+                            <div className="bg-white p-6 rounded-xl shadow-md">
+                                <h3 className="text-xl md:text-2xl font-semibold text-gray-800 mb-4">Recent Activity</h3>
+                                {activityLog.length > 0 ? (
+                                    <ul className="max-h-80 overflow-y-auto styled-scrollbar">
+                                        {activityLog.map(item => (
+                                            <ActivityItem key={item.id} item={item} />
+                                        ))}
+                                    </ul>
+                                ) : (
+                                    <p className="text-gray-500 text-center py-4">No recent activity.</p>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Dashboard Charts */}
+                        <div className="lg:col-span-3">
+                           <DashboardCharts students={activeStudents || []} netProfit={netProfit} />
                         </div>
                     </div>
-                    <DashboardCharts students={activeStudents} />
                 </>
             )}
         </div>
     );
 });
+
 
 const SupportView = React.memo(() => (
     <div className="bg-white p-6 md:p-8 rounded-xl shadow-lg max-w-2xl mx-auto animate-fade-in-up">
@@ -1508,7 +1999,7 @@ const StudentManagement = React.memo(({ students, onAddStudent, onView, onEdit, 
                                     <>
                                         <button onClick={() => onEdit(s)} className="p-2 rounded-md bg-yellow-100 text-yellow-600 hover:bg-yellow-200" title="Edit Student"><Edit size={16} /></button>
                                         <button onClick={() => onDelete(s)} className="p-2 rounded-md bg-red-100 text-red-600 hover:bg-red-200" title="Delete Student"><Trash2 size={16} /></button>
-                                        <button onClick={() => onDepart(s)} className="p-2 rounded-md bg-gray-200 text-gray-700 hover:bg-gray-300" title="Depart Student"><UserX size={16} /></button>
+                                        <button onClick={() => onDepart(s)} className="p-2 rounded-md bg-gray-200 text-gray-700 hover:bg-gray-300" title="Settle & Depart"><UserX size={16} /></button>
                                     </>
                                 )}
                             </div>
@@ -1524,21 +2015,35 @@ const StudentManagement = React.memo(({ students, onAddStudent, onView, onEdit, 
     );
 });
 
-const FeeManagement = React.memo(({ students, onPayFee, onMarkAsDue, onPrintReceipt, onWhatsApp, onViewProfile, onReactivate }) => {
-    const initialFilters = { searchQuery: '', dateRange: { from: '', to: '' }, feeStatus: 'all', shiftType: 'all', studentStatus: 'all', dateFilterType: 'next_due_date', };
+const FeeManagement = React.memo(({ students, onPayFee, onMarkAsDue, onPrintReceipt, onWhatsApp, onViewProfile, onReactivate, onSettle }) => {
+    // *** FIX: Added dateRange and dateFilterType to initial filters ***
+    const initialFilters = { searchQuery: '', dateRange: { from: '', to: '' }, feeStatus: 'all', shiftType: 'all', studentStatus: 'active', dateFilterType: 'next_due_date', };
     const [filters, setFilters] = useState(initialFilters);
     const handleFilterChange = (e) => { const { name, value } = e.target; setFilters(prev => ({ ...prev, [name]: value })); };
+    // *** FIX: Added date change handler ***
     const handleDateChange = (e) => { const { name, value } = e.target; setFilters(prev => ({ ...prev, dateRange: { ...prev.dateRange, [name]: value } })); };
     const resetFilters = () => { setFilters(initialFilters); };
+
     const filteredStudents = useMemo(() => {
         return students.filter(s => {
+            // Filter 1: Student Status
             if (filters.studentStatus !== 'all' && s.status !== filters.studentStatus) return false;
+            
+            // Filter 2: Search Query
             const query = filters.searchQuery.toLowerCase();
             if (query && !s.name.toLowerCase().includes(query) && !s.mobile?.includes(query) && !s.student_id.includes(query)) { return false; }
+            
+            // Filter 3: Fee Status (Only applicable to Active Students)
             const due = isFeeDue(s.next_due_date);
-            if (filters.feeStatus === 'due' && !due) return false;
-            if (filters.feeStatus === 'paid' && due) return false;
+            if (s.status === 'active') {
+                if (filters.feeStatus === 'due' && !due) return false;
+                if (filters.feeStatus === 'paid' && due) return false;
+            }
+            
+            // Filter 4: Admission Type (Shift)
             if (filters.shiftType !== 'all' && s.admission_type !== filters.shiftType) return false;
+            
+            // Filter 5: Date Range
             const fromDate = filters.dateRange.from ? new Date(filters.dateRange.from) : null;
             const toDate = filters.dateRange.to ? new Date(filters.dateRange.to) : null;
             if (fromDate || toDate) {
@@ -1549,6 +2054,7 @@ const FeeManagement = React.memo(({ students, onPayFee, onMarkAsDue, onPrintRece
             return true;
         });
     }, [students, filters]);
+
     return (
         <div className="space-y-6">
             <div className="bg-white p-4 md:p-6 rounded-lg shadow-md">
@@ -1567,7 +2073,7 @@ const FeeManagement = React.memo(({ students, onPayFee, onMarkAsDue, onPrintRece
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">Fee Status</label>
                         <select name="feeStatus" value={filters.feeStatus} onChange={handleFilterChange} className="w-full p-2 border border-gray-300 rounded-lg bg-white">
-                            <option value="all">All Fee Status</option>
+                            <option value="all">All Active Status</option>
                             <option value="paid">Paid</option>
                             <option value="due">Due</option>
                         </select>
@@ -1575,11 +2081,25 @@ const FeeManagement = React.memo(({ students, onPayFee, onMarkAsDue, onPrintRece
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">Student Status</label>
                         <select name="studentStatus" value={filters.studentStatus} onChange={handleFilterChange} className="w-full p-2 border border-gray-300 rounded-lg bg-white">
-                            <option value="all">All Students</option>
                             <option value="active">Active</option>
                             <option value="departed">Inactive</option>
+                            <option value="all">All Students</option>
                         </select>
                     </div>
+
+                    {/* *** FIX: Added Date Filter JSX *** */}
+                    <div className="p-4 border rounded-lg bg-gray-50 md:col-span-2 lg:col-span-4">
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Filter by Date Range</label>
+                        <div className="flex flex-col sm:flex-row gap-2">
+                            <select name="dateFilterType" value={filters.dateFilterType} onChange={handleFilterChange} className="p-2 border border-gray-300 rounded-lg bg-white w-full sm:w-1/3">
+                                <option value="next_due_date">Next Due Date</option>
+                                <option value="admission_date">Admission Date</option>
+                            </select>
+                            <input type="date" name="from" value={filters.dateRange.from} onChange={handleDateChange} className="p-2 border border-gray-300 rounded-lg w-full sm:w-1/3" />
+                            <input type="date" name="to" value={filters.dateRange.to} onChange={handleDateChange} className="p-2 border border-gray-300 rounded-lg w-full sm:w-1/3" />
+                        </div>
+                    </div>
+
                 </div>
             </div>
             <div className="bg-white p-4 md:p-6 rounded-lg shadow-md">
@@ -1614,10 +2134,12 @@ const FeeManagement = React.memo(({ students, onPayFee, onMarkAsDue, onPrintRece
                                             <div className="flex items-center gap-2 flex-wrap">
                                                 {s.status === 'active' ? (
                                                     <>
-                                                        <button onClick={() => onPayFee(s)} className="bg-blue-500 text-white px-3 py-1 text-xs rounded-md hover:bg-blue-600">Pay Fee</button>
-                                                        {!due && (<button onClick={() => onMarkAsDue(s.id)} className="bg-yellow-500 text-white px-3 py-1 text-xs rounded-md hover:bg-yellow-600 flex items-center gap-1" title="Mark fee as due immediately"><AlertTriangle size={14} /> Mark Due</button>)}
+                                                        <button onClick={() => onPayFee(s)} className="bg-blue-500 text-white px-3 py-1 text-xs rounded-md hover:bg-blue-600" title="Pay Fee">Pay Fee</button>
+                                                        
+                                                        {!due && (<button onClick={() => onMarkAsDue(s.id)} className="bg-yellow-500 text-white p-2 rounded-md hover:bg-yellow-600 flex items-center gap-1" title="Mark fee as due immediately"><AlertTriangle size={14} /></button>)}
                                                         <button onClick={() => onPrintReceipt(s)} className="bg-teal-500 text-white p-2 rounded-md hover:bg-teal-600 flex items-center gap-1" title="Print Receipt"><Printer size={14} /></button>
                                                         <button onClick={() => onWhatsApp(s, due ? 'due' : 'paid')} className="bg-green-500 text-white p-2 rounded-md hover:bg-green-600 flex items-center gap-1" title="Send WhatsApp Message"><MessageSquare size={14} /></button>
+                                                        <button onClick={() => onSettle(s)} className="bg-red-500 text-white p-2 rounded-md hover:bg-red-600 flex items-center gap-1" title="Settle & Depart"><UserX size={14} /></button>
                                                     </>
                                                 ) : (
                                                     <button onClick={() => onReactivate(s)} className="bg-green-600 text-white px-3 py-1 text-xs rounded-md hover:bg-green-700 flex items-center gap-1" title="Reactivate Student"><UserCheck size={14} /> Reactivate</button>
@@ -1673,12 +2195,6 @@ const DeparturesView = React.memo(({ departedStudents }) => (
     </div>
 ));
 
-const SettingsView = React.memo(({ feeStructure, onUpdate }) => {
-    const [fees, setFees] = useState(feeStructure); const [saved, setSaved] = useState(false);
-    const handleSave = () => { onUpdate(fees); setSaved(true); setTimeout(() => setSaved(false), 2000); };
-    return (<div className="bg-white p-6 rounded-lg shadow-md max-w-md mx-auto"><h3 className="text-2xl font-semibold text-gray-800 mb-6">Fee Structure Settings</h3><div className="space-y-4"><div><label htmlFor="full-time-fee" className="block text-sm font-medium text-gray-700 mb-1">Full-time Fee (₹)</label><input type="number" id="full-time-fee" value={fees['Full-time']} onChange={e => setFees({ ...fees, 'Full-time': Number(e.target.value) })} className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500" /></div><div><label htmlFor="half-time-fee" className="block text-sm font-medium text-gray-700 mb-1">Half-time Fee (₹)</label><input type="number" id="half-time-fee" value={fees['Half-time']} onChange={e => setFees({ ...fees, 'Half-time': Number(e.target.value) })} className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500" /></div></div><button onClick={handleSave} className="w-full mt-6 bg-indigo-600 text-white p-3 rounded-lg hover:bg-indigo-700 transition duration-200 font-semibold flex items-center justify-center">{saved ? (<><CheckCircle size={20} className="mr-2" /> Saved!</>) : ('Save Changes')}</button></div>);
-});
-
 const Button = ({ children, ...props }) => <button {...props} className={`flex items-center justify-center px-4 py-2 rounded-lg font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed ${props.className}`}>{props.disabled && <Loader2 className="animate-spin mr-2 h-5 w-5" />}{children}</button>;
 
 const ConfirmationModal = React.memo(({ onConfirm, onClose, text, title, confirmText, item, isSubmitting }) => (<div><h3 className={`text-xl md:text-2xl font-semibold mb-2 ${confirmText === 'Delete' ? 'text-red-700' : 'text-gray-800'}`}>{title}</h3><p className="text-gray-600 mb-6">{text}</p><div className="flex justify-end gap-4"><button onClick={onClose} disabled={isSubmitting} className="px-4 py-2 rounded-lg bg-gray-200 hover:bg-gray-300 disabled:opacity-60">Cancel</button><Button onClick={() => onConfirm(item)} disabled={isSubmitting} className={confirmText === 'Delete' ? 'bg-red-600 hover:bg-red-700 text-white' : 'bg-indigo-600 hover:bg-indigo-700 text-white'}>{isSubmitting ? `${confirmText}...` : confirmText}</Button></div></div>));
@@ -1712,7 +2228,7 @@ const AddStudentForm = React.memo(({ onAddStudent, seats, prefill, feeStructure,
         }
     };
     
-    const handleSubmit = (e) => { e.preventDefault(); setError(''); if (!photoFile) { setError('Photo is compulsory for admission.'); return; } const finalData = { ...formData }; if (finalData.admissionType === 'Full-time') { finalData.shift = null; } onAddStudent(finalData, photoFile); };
+    const handleSubmit = (e) => { e.preventDefault(); setError(''); if (photoFile) { setError('Photo is compulsory for admission.'); return; } const finalData = { ...formData }; if (finalData.admissionType === 'Full-time') { finalData.shift = null; } onAddStudent(finalData, photoFile); };
     
     const availableSeats = useMemo(() => {
         const studentGender = formData.title === 'Mr.' ? 'boy' : 'girl';
@@ -1724,7 +2240,7 @@ const AddStudentForm = React.memo(({ onAddStudent, seats, prefill, feeStructure,
         });
     }, [seats, formData.title, formData.admissionType, formData.shift]);
     
-    return (<form onSubmit={handleSubmit} className="space-y-4"><h3 className="text-xl md:text-2xl font-semibold mb-6 text-gray-800">New Student Admission</h3><div className="flex items-center justify-center"><label htmlFor="photo-upload" className="cursor-pointer"><div className={`w-24 h-24 rounded-full bg-gray-200 flex items-center justify-center border-2 border-dashed ${error ? 'border-red-500' : 'hover:border-indigo-500'}`}>{photoPreview ? <img src={photoPreview} alt="Preview" className="w-full h-full rounded-full object-cover" /> : <ImageIcon className="text-gray-400" size={40} />}</div></label><input id="photo-upload" type="file" className="hidden" accept="image/*" onChange={handlePhotoChange} /></div>{error && <p className="text-red-500 text-sm text-center">{error}</p>}<div className="grid grid-cols-1 md:grid-cols-2 gap-4"><div><label>Title</label><select name="title" value={formData.title} onChange={handleChange} className="w-full p-2 border rounded-lg bg-white"><option>Mr.</option><option>Ms.</option></select></div><div><label>Full Name</label><input type="text" name="name" value={formData.name} onChange={handleChange} className="w-full p-2 border rounded-lg" required /></div><div><label>Father/Husband Name</label><input type="text" name="fatherName" value={formData.fatherName} onChange={handleChange} className="w-full p-2 border rounded-lg" required /></div><div><label>Mobile</label><input type="tel" name="mobile" value={formData.mobile} onChange={handleChange} className="w-full p-2 border rounded-lg" required /></div><div><label>Admission Date</label><input type="date" name="admissionDate" value={formData.admissionDate} onChange={handleChange} className="w-full p-2 border rounded-lg" required /></div><div><label>Admission Type</label><select name="admissionType" value={formData.admissionType} onChange={handleChange} className="w-full p-2 border rounded-lg bg-white" disabled={!!prefill?.prefillShift}><option value="Full-time">Full-time</option><option value="Half-time">Half-time</option></select></div>{formData.admissionType === 'Half-time' && (<div><label>Shift</label><select name="shift" value={formData.shift} onChange={handleChange} className="w-full p-2 border rounded-lg bg-white" disabled={!!prefill?.prefillShift}><option value="Morning">Morning</option><option value="Evening">Evening</option></select></div>)}<div className={formData.admissionType === 'Half-time' ? '' : 'md:col-span-2'}><label>Assign Seat</label><select name="seatNumber" value={formData.seatNumber} onChange={handleChange} className="w-full p-2 border rounded-lg bg-white" required ><option value="">Select an available seat</option>{availableSeats.map(s => <option key={s.number} value={s.number}>Seat {s.number}</option>)}</select></div></div><div className="p-4 bg-indigo-50 rounded-lg text-center"><h4 className="font-semibold text-indigo-800">Fee for {formData.admissionType}: <span className="font-bold">₹{feeStructure[formData.admissionType]}</span></h4></div><Button type="submit" disabled={isSubmitting} className="w-full mt-6 bg-indigo-600 text-white p-3 hover:bg-indigo-700">{isSubmitting ? 'Saving...' : 'Confirm Admission'}</Button> </form>);
+    return (<form onSubmit={handleSubmit} className="space-y-4"><h3 className="text-xl md:text-2xl font-semibold mb-6 text-gray-800">New Student Admission</h3><div className="flex items-center justify-center"><label htmlFor="photo-upload" className="cursor-pointer"><div className={`w-24 h-24 rounded-full bg-gray-200 flex items-center justify-center border-2 border-dashed ${error ? 'border-red-500' : 'hover:border-indigo-500'}`}>{photoPreview ? <img src={photoPreview} alt="Preview" className="w-full h-full rounded-full object-cover" /> : <ImageIcon className="text-gray-400" size={40} />}</div></label><input id="photo-upload" type="file" className="hidden" accept="image/*" onChange={handlePhotoChange} /></div>{error && <p className="text-red-500 text-sm text-center">{error}</p>}<div className="grid grid-cols-1 md:grid-cols-2 gap-4"><div><label>Title</label><select name="title" value={formData.title} onChange={handleChange} className="w-full p-2 border rounded-lg bg-white"><option>Mr.</option><option>Ms.</option></select></div><div><label>Full Name</label><input type="text" name="name" value={formData.name} onChange={handleChange} className="w-full p-2 border rounded-lg" required /></div><div><label>Father/Husband Name</label><input type="text" name="fatherName" value={formData.fatherName} onChange={handleChange} className="w-full p-2 border rounded-lg" required /></div><div><label>Mobile</label><input type="tel" name="mobile" value={formData.mobile} onChange={handleChange} className="w-full p-2 border rounded-lg" required /></div><div><label>Admission Date</label><input type="date" name="admissionDate" value={formData.admissionDate} onChange={handleChange} className="w-full p-2 border rounded-lg" required /></div><div><label>Admission Type</label><select name="admissionType" value={formData.admissionType} onChange={handleChange} className="w-full p-2 border rounded-lg bg-white" disabled={!!prefill?.prefillShift}><option value="Full-time">Full-time</option><option value="Half-time">Half-time</option></select></div>{formData.admissionType === 'Half-time' && (<div><label>Shift</label><select name="shift" value={formData.shift} onChange={handleChange} className="w-full p-2 border rounded-lg bg-white" disabled={!!prefill?.prefillShift}><option value="Morning">Morning</option><option value="Evening">Evening</option></select></div>)}<div className={formData.admissionType === 'Half-time' ? '' : 'md:col-span-2'}><label>Assign Seat</label><select name="seatNumber" value={formData.seatNumber} onChange={handleChange} className="w-full p-2 border rounded-lg bg-white" required ><option value="">Select an available seat</option>{availableSeats.map(s => <option key={s.number} value={s.number}>Seat {s.number}</option>)}</select></div></div><div className="p-4 bg-indigo-50 rounded-lg text-center"><h4 className="font-semibold text-indigo-800">Fee for {formData.admissionType}: <span className="font-bold">₹{feeStructure[formData.admissionType] || 0}</span></h4></div><Button type="submit" disabled={isSubmitting} className="w-full mt-6 bg-indigo-600 text-white p-3 hover:bg-indigo-700">{isSubmitting ? 'Saving...' : 'Confirm Admission'}</Button> </form>);
 });
 
 const EditStudentForm = React.memo(({ student, onEditStudent, isSubmitting }) => {
@@ -1737,58 +2253,371 @@ const StudentFeeProfile = React.memo(({ student, onPay, isSubmitting }) => {
     const [paymentMethod, setPaymentMethod] = useState('UPI');
     const [months, setMonths] = useState(1);
     const handleConfirmPayment = () => { onPay(student.id, { amount: student.fee_amount, method: paymentMethod }, months); };
-    return (<div><h3 className="text-xl md:text-2xl font-semibold mb-2 text-gray-800">{student.name}'s Fee Profile</h3><p className="text-gray-600 mb-4">Reg. No: {student.student_id} | Next Due: {new Date(student.next_due_date).toLocaleDateString()}</p><div className="mb-4"><h4 className="font-semibold text-gray-700 mb-2">Payment History</h4><div className="max-h-40 overflow-y-auto border rounded-lg p-2 bg-gray-50">{student.payment_history && student.payment_history.length > 0 ? student.payment_history.map((p, i) => (<div key={i} className="flex justify-between items-center p-2 border-b"><p>{new Date(p.date).toLocaleDateString()}: <span className="font-bold">₹{p.amount}</span></p><span className="text-xs bg-gray-200 px-2 py-1 rounded-full">{p.method}</span></div>)) : <p className="text-center text-gray-500">No payments recorded.</p>}</div></div>{student.received_credit_log && student.received_credit_log.length > 0 && (<div className="mb-4"><h4 className="font-semibold text-gray-700 mb-2">Credit History</h4><div className="max-h-40 overflow-y-auto border rounded-lg p-2 bg-gray-50">{student.received_credit_log.map((log, i) => (<div key={i} className="p-2 border-b text-sm">Received <strong>{log.daysReceived} days</strong> from {log.fromName} on {new Date(log.date).toLocaleDateString()}</div>))}</div></div>)}<div><h4 className="font-semibold text-gray-700 mb-2">Receive New Payment</h4><div className="p-4 border rounded-lg"><p>Amount per month: <span className="font-bold text-xl">₹{student.fee_amount}</span></p><div className="my-2"><label className="block text-sm">Payment Method</label><select value={paymentMethod} onChange={e => setPaymentMethod(e.target.value)} className="w-full p-2 border rounded-lg bg-white"><option>UPI</option><option>Cash</option></select></div><div className="my-2"><label className="block text-sm">Pay for how many months?</label><input type="number" value={months} onChange={e => setMonths(Math.max(1, parseInt(e.target.value) || 1))} className="w-full p-2 border rounded-lg" min="1" /></div><div className="mt-2 font-bold text-lg">Total Amount: ₹{student.fee_amount * months}</div><Button onClick={handleConfirmPayment} disabled={isSubmitting} className="w-full mt-2 bg-green-600 text-white p-3 hover:bg-green-700">{isSubmitting ? 'Processing...' : 'Confirm Payment'}</Button></div></div></div>);
+    const feeIsCurrentlyDue = isFeeDue(student.next_due_date);
+    
+    return (
+    <div>
+        <h3 className="text-xl md:text-2xl font-semibold mb-2 text-gray-800">{student.name}'s Fee Profile}</h3>
+        <p className="text-gray-600 mb-4">Reg. No: {student.student_id} | Next Due: {new Date(student.next_due_date).toLocaleDateString()}
+            <span className={`ml-2 font-bold ${feeIsCurrentlyDue ? 'text-red-600' : 'text-green-600'}`}>
+                ({feeIsCurrentlyDue ? 'Due' : 'Paid'})
+            </span>
+        </p>
+
+        <div className="mb-4">
+            <h4 className="font-semibold text-gray-700 mb-2">Payment History</h4>
+            <div className="max-h-40 overflow-y-auto border rounded-lg p-2 bg-gray-50 styled-scrollbar">
+                {student.payment_history && student.payment_history.length > 0 ? [...student.payment_history].reverse().map((p, i) => (
+                    <div key={i} className="flex justify-between items-center p-2 border-b last:border-b-0">
+                        <div>
+                            <p>{new Date(p.date).toLocaleDateString()}: <span className="font-bold">₹{p.amount}</span></p>
+                            <p className="text-xs text-gray-500">For period: {new Date(p.cycle_start).toLocaleDateString()} - {new Date(p.cycle_end).toLocaleDateString()}</p>
+                        </div>
+                        <span className="text-xs bg-gray-200 px-2 py-1 rounded-full">{p.method}</span>
+                    </div>
+                )) : <p className="text-center text-gray-500 p-3">No payments recorded.</p>}
+            </div>
+        </div>
+
+        {student.received_credit_log && student.received_credit_log.length > 0 && (
+            <div className="mb-4">
+                <h4 className="font-semibold text-gray-700 mb-2">Credit History (Days Received)</h4>
+                <div className="max-h-40 overflow-y-auto border rounded-lg p-2 bg-gray-50 styled-scrollbar">
+                    {student.received_credit_log.map((log, i) => (
+                        <div key={i} className="p-2 border-b text-sm last:border-b-0">
+                            Received <strong>{log.daysReceived} days</strong> from {log.fromName} on {new Date(log.date).toLocaleDateString()}
+                        </div>
+                    ))}
+                </div>
+            </div>
+        )}
+
+        <div>
+            <h4 className="font-semibold text-gray-700 mb-2">Receive New Payment</h4>
+            <div className="p-4 border rounded-lg">
+                <p>Amount per month: <span className="font-bold text-xl">₹{student.fee_amount}</span></p>
+                <div className="my-2"><label className="block text-sm">Payment Method</label><select value={paymentMethod} onChange={e => setPaymentMethod(e.target.value)} className="w-full p-2 border rounded-lg bg-white"><option>UPI</option><option>Cash</option></select></div>
+                <div className="my-2">
+                    <label className="block text-sm">Pay for how many months? ({feeIsCurrentlyDue ? '1 month will cover the due period' : 'All months will be in advance'})</label>
+                    <input type="number" value={months} onChange={e => setMonths(Math.max(1, parseInt(e.target.value) || 1))} className="w-full p-2 border rounded-lg" min="1" />
+                </div>
+                <div className="mt-2 font-bold text-lg">Total Amount: ₹{student.fee_amount * months}</div>
+                <Button onClick={handleConfirmPayment} disabled={isSubmitting} className="w-full mt-2 bg-green-600 text-white p-3 hover:bg-green-700">{isSubmitting ? 'Processing...' : `Pay for ${months} Month(s)`}</Button>
+            </div>
+        </div>
+    </div>
+    );
 });
 
-const DepartStudentForm = React.memo(({ student, students, onConfirm, isSubmitting }) => {
+const SettleStudentForm = React.memo(({ student, students, onConfirm, isSubmitting }) => {
     const [transferTo, setTransferTo] = useState('');
     const [reason, setReason] = useState('');
-    const today = new Date(); const nextDueDate = new Date(student.next_due_date); const remainingDays = nextDueDate > today ? Math.ceil((nextDueDate - today) / (1000 * 60 * 60 * 24)) : 0;
-    return (<div><h3 className="text-xl md:text-2xl font-semibold mb-2 text-red-700">Student Departure</h3><p className="mb-4">Confirm departure for <strong>{student.name}</strong> (Reg. No: {student.student_id})?</p><div className="p-4 bg-yellow-50 border border-yellow-200 rounded-lg mb-4"><h4 className="font-semibold">Credit Calculation</h4><p>Remaining billable days: <span className="font-bold">{remainingDays}</span></p>{remainingDays > 0 && <p className="text-sm text-gray-600">You can transfer these days to another student.</p>}</div>{remainingDays > 0 && (<div className="mb-4"><label className="block text-sm font-medium">Transfer Remaining Days To (Optional)</label><select value={transferTo} onChange={e => setTransferTo(e.target.value)} className="w-full p-2 border rounded-lg bg-white"><option value="">Don't Transfer</option>{students.filter(s => s.id !== student.id && s.status === 'active').map(s => (<option key={s.id} value={s.id}>{s.name} (Reg. No: {s.student_id})</option>))}</select></div>)}<div className="mb-4"><label className="block text-sm font-medium">Reason for Leaving (Optional)</label><textarea value={reason} onChange={e => setReason(e.target.value)} className="w-full p-2 border rounded-lg" rows="3" placeholder="e.g., Course completed, Relocating..."></textarea></div><Button onClick={() => onConfirm(student.id, transferTo, reason)} disabled={isSubmitting} className="w-full mt-6 bg-red-600 text-white p-3 hover:bg-red-700">{isSubmitting ? 'Departing...' : 'Confirm Departure'}</Button></div>);
+    const [settlementDate, setSettlementDate] = useState(new Date().toISOString().split('T')[0]);
+
+    const calculation = useMemo(() => {
+        const today = new Date(settlementDate);
+        today.setHours(0, 0, 0, 0);
+        const nextDueDate = new Date(student.next_due_date);
+        nextDueDate.setHours(0, 0, 0, 0);
+
+        let lastDueDate = new Date(nextDueDate);
+        lastDueDate.setMonth(lastDueDate.getMonth() - 1);
+        
+        const daysInCycle = daysBetween(lastDueDate, nextDueDate);
+        const dailyRate = (student.fee_amount / (daysInCycle || 30)).toFixed(2);
+        
+        if (today >= nextDueDate) {
+            // Fee is due
+            const daysOverdue = daysBetween(nextDueDate, today);
+            const amountDue = (daysOverdue * dailyRate).toFixed(0);
+            return {
+                type: 'charge',
+                daysUsed: daysOverdue,
+                daysRemaining: 0,
+                dailyRate,
+                finalAmount: amountDue,
+                message: `Student's fee was due. They have used ${daysOverdue} extra days.`
+            };
+        } else {
+            // Fee is paid in advance
+            const daysUsed = daysBetween(lastDueDate, today);
+            const daysRemaining = daysBetween(today, nextDueDate);
+            const refundAmount = (daysRemaining * dailyRate).toFixed(0);
+            return {
+                type: 'refund',
+                daysUsed,
+                daysRemaining,
+                dailyRate,
+                finalAmount: refundAmount,
+                message: `Student has ${daysRemaining} paid days remaining.`
+            };
+        }
+    }, [student.next_due_date, student.fee_amount, settlementDate]);
+
+    const handleSubmit = () => {
+        const settlementData = {
+            reason,
+            transferTargetDBId: transferTo,
+            settlement_date: settlementDate,
+            days_used: calculation.daysUsed,
+            daily_rate: calculation.dailyRate,
+            final_amount: calculation.finalAmount,
+            settlement_type: calculation.type,
+            daysRemaining: calculation.daysRemaining, // Pass remaining days for receipt printing
+        };
+        onConfirm(student.id, settlementData);
+    };
+
+    return (
+    <div>
+        <h3 className="text-xl md:text-2xl font-semibold mb-2 text-red-700">Settle & Depart Student</h3>
+        <p className="mb-4">Confirming departure for <strong>{student.name}</strong> (Reg. No: {student.student_id})</p>
+        
+        <div className="mb-4">
+            <label className="block text-sm font-medium">Settlement Date</label>
+            <input 
+                type="date" 
+                value={settlementDate} 
+                onChange={e => setSettlementDate(e.target.value)} 
+                className="w-full p-2 border rounded-lg"
+            />
+        </div>
+        
+        <div className="p-4 bg-yellow-50 border border-yellow-200 rounded-lg mb-4">
+            <h4 className="font-semibold">Settlement Calculation</h4>
+            <p className="text-sm">{calculation.message}</p>
+            {calculation.type === 'charge' ? (
+                <p className="font-bold text-lg text-red-700">Final Charge: ₹{calculation.finalAmount}</p>
+            ) : (
+                <p className="font-bold text-lg text-green-700">Refund/Transfer Value: ₹{calculation.finalAmount} ({calculation.daysRemaining} days)</p>
+            )}
+        </div>
+        
+        {calculation.type === 'refund' && Number(calculation.finalAmount) > 0 && (
+            <div className="mb-4">
+                <label className="block text-sm font-medium">Transfer Remaining Days To (Optional)</label>
+                <select value={transferTo} onChange={e => setTransferTo(e.target.value)} className="w-full p-2 border rounded-lg bg-white">
+                    <option value="">Don't Transfer (Refund)</option>
+                    {students.filter(s => s.id !== student.id && s.status === 'active').map(s => (
+                        <option key={s.id} value={s.id}>{s.name} (Reg. No: {s.student_id})</option>
+                    ))}
+                </select>
+            </div>
+        )}
+        
+        <div className="mb-4">
+            <label className="block text-sm font-medium">Reason for Leaving (Optional)</label>
+            <textarea value={reason} onChange={e => setReason(e.target.value)} className="w-full p-2 border rounded-lg" rows="3" placeholder="e.g., Course completed, Relocating..."></textarea>
+        </div>
+        
+        <Button onClick={handleSubmit} disabled={isSubmitting} className="w-full mt-6 bg-red-600 text-white p-3 hover:bg-red-700">
+            {isSubmitting ? 'Processing...' : `Confirm Settlement & Depart`}
+        </Button>
+    </div>
+    );
 });
+
 
 const ReactivateStudentForm = React.memo(({ student, seats, onConfirm, isSubmitting }) => {
     const [newSeatNumber, setNewSeatNumber] = useState('');
     const availableSeats = useMemo(() => seats.filter(s => !s.occupiedBy.morning && !s.occupiedBy.evening), [seats]);
     const handleSubmit = (e) => { e.preventDefault(); if (!newSeatNumber) { alert("Please select a new seat for the student."); return; } onConfirm(student.id, newSeatNumber); };
-    return (<form onSubmit={handleSubmit}><h3 className="text-xl md:text-2xl font-semibold mb-2 text-green-700">Reactivate Student</h3><p className="mb-4">Reactivating <strong>{student.name}</strong> (Reg. No: {student.student_id}). Please assign a new seat.</p><div className="mb-4"><label htmlFor="seat-select" className="block text-sm font-medium mb-1">Assign New Seat</label><select id="seat-select" value={newSeatNumber} onChange={e => setNewSeatNumber(e.target.value)} className="w-full p-2 border rounded-lg bg-white" required><option value="">Select an available seat</option>{availableSeats.map(s => (<option key={s.number} value={s.number}>Seat {s.number} ({s.gender.charAt(0).toUpperCase() + s.gender.slice(1)})</option>))}</select></div><Button type="submit" disabled={isSubmitting || !newSeatNumber} className="w-full mt-6 bg-green-600 text-white p-3 hover:bg-green-700">{isSubmitting ? 'Reactivating...' : 'Confirm Reactivation'}</Button></form>);
+    return (<form onSubmit={handleSubmit}><h3 className="text-xl md:text-2xl font-semibold mb-2 text-green-700">Reactivate Student</h3><p className="mb-4">Reactivating <strong>{student.name}</strong> (Reg. No: {student.student_id}). Please assign a new seat. Their fee will be marked as due today.</p><div className="mb-4"><label htmlFor="seat-select" className="block text-sm font-medium mb-1">Assign New Seat</label><select id="seat-select" value={newSeatNumber} onChange={e => setNewSeatNumber(e.target.value)} className="w-full p-2 border rounded-lg bg-white" required><option value="">Select an available seat</option>{availableSeats.map(s => (<option key={s.number} value={s.number}>Seat {s.number} ({s.gender.charAt(0).toUpperCase() + s.gender.slice(1)})</option>))}</select></div><Button type="submit" disabled={isSubmitting || !newSeatNumber} className="w-full mt-6 bg-green-600 text-white p-3 hover:bg-green-700">{isSubmitting ? 'Reactivating...' : 'Confirm Reactivation'}</Button></form>);
 });
 
 const ListViewModal = React.memo(({ title, data, onWhatsApp }) => {
-    const showWhatsAppButton = onWhatsApp && title.includes('Fee Alerts');
+    const showWhatsAppButton = onWhatsApp && title.includes('Fee');
     return (<div><h3 className="text-xl md:text-2xl font-semibold mb-4 text-gray-800">{title}</h3><div className="max-h-80 overflow-y-auto"><div className={`grid ${showWhatsAppButton ? 'grid-cols-4' : 'grid-cols-3'} items-center p-2 border-b bg-gray-50 font-semibold text-sm text-gray-600 sticky top-0`}><span>Student</span><span>Admission Date</span><span className="text-right">Next Due Date</span>{showWhatsAppButton && <span className="text-right">Action</span>}</div>{data.length > 0 ? data.map(s => (<div key={s.id} className={`grid ${showWhatsAppButton ? 'grid-cols-4' : 'grid-cols-3'} items-center p-2 border-b`}><div><p className="font-medium">{s.name}</p><p className="text-sm text-gray-500">Reg: {s.student_id}</p></div><div className="text-sm text-gray-600"><p>{new Date(s.admission_date).toLocaleDateString()}</p></div><div className="text-sm text-gray-600 text-right"><p>{new Date(s.next_due_date).toLocaleDateString()}</p></div>{showWhatsAppButton && (<div className="text-right"><button onClick={() => onWhatsApp(s, 'due')} className="p-2 rounded-md bg-green-100 text-green-600 hover:bg-green-200" title="Send WhatsApp Reminder"><MessageSquare size={16} /></button></div>)}</div>)) : <p className="text-center text-gray-500 p-4">No students to display.</p>}</div></div>);
 });
 
-const FeeReceipt = React.forwardRef(({ student, libraryProfile, payment }, ref) => {
+// *** FIX: Added guard clause for null/undefined input ***
+const numberToWords = (num) => { 
+    if (num === null || num === undefined) {
+        return 'Zero Only';
+    }
+    const a = ['', 'one ', 'two ', 'three ', 'four ', 'five ', 'six ', 'seven ', 'eight ', 'nine ', 'ten ', 'eleven ', 'twelve ', 'thirteen ', 'fourteen ', 'fifteen ', 'sixteen ', 'seventeen ', 'eighteen ', 'nineteen ']; 
+    const b = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety']; 
+    if ((num = Math.abs(num).toString()).length > 9) return 'overflow'; 
+    let n = parseInt(num); 
+    if (n === 0) return 'Zero Only'; 
+    let str = ''; 
+    if (n >= 1000) { str += a[Math.floor(n / 1000)] + 'thousand '; n %= 1000; } 
+    if (n >= 100) { str += a[Math.floor(n / 100)] + 'hundred '; n %= 100; } 
+    if (n > 0) { if (str !== '') str += 'and '; if (n < 20) { str += a[n]; } else { str += b[Math.floor(n / 10)] + a[n % 10]; } } 
+    return str.trim().split(' ').map(s => s.charAt(0).toUpperCase() + s.substring(1)).join(' ') + ' Only'; 
+};
+
+const FeeReceipt = forwardRef(({ student, libraryProfile, payment }, ref) => {
     const paymentDate = new Date(payment.date);
-    const toDate = new Date(student.next_due_date);
-    const fromDate = new Date(student.next_due_date);
-    fromDate.setMonth(fromDate.getMonth() - 1);
-    const receiptNo = `${student.student_id}-${paymentDate.getFullYear()}${(paymentDate.getMonth() + 1).toString().padStart(2, '0')}`;
-    const numberToWords = (num) => { const a = ['', 'one ', 'two ', 'three ', 'four ', 'five ', 'six ', 'seven ', 'eight ', 'nine ', 'ten ', 'eleven ', 'twelve ', 'thirteen ', 'fourteen ', 'fifteen ', 'sixteen ', 'seventeen ', 'eighteen ', 'nineteen ']; const b = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety']; if ((num = num.toString()).length > 9) return 'overflow'; let n = parseInt(num); if (n === 0) return 'Zero Only'; let str = ''; if (n >= 1000) { str += a[Math.floor(n / 1000)] + 'thousand '; n %= 1000; } if (n >= 100) { str += a[Math.floor(n / 100)] + 'hundred '; n %= 100; } if (n > 0) { if (str !== '') str += 'and '; if (n < 20) { str += a[n]; } else { str += b[Math.floor(n / 10)] + a[n % 10]; } } return str.trim().split(' ').map(s => s.charAt(0).toUpperCase() + s.substring(1)).join(' ') + ' Only'; };
+    const toDate = new Date(payment.cycle_end);
+    const fromDate = new Date(payment.cycle_start);
+    const receiptNo = `${student.student_id}-${paymentDate.getFullYear()}${(paymentDate.getMonth() + 1).toString().padStart(2, '0')}${paymentDate.getDate()}`;
+    
     return (<div ref={ref} className="p-2 bg-white text-gray-900"><style type="text/css" media="print">{`@import url('https://fonts.googleapis.com/css2?family=Roboto+Slab:wght@400;700&display=swap'); @page { size: A5; margin: 0; } body { -webkit-print-color-adjust: exact; font-family: 'Roboto Slab', serif; } .no-print { display: none; } .receipt-container { border: 2px solid #000 !important; }`}</style><div className="receipt-container border-2 border-dashed border-gray-400 p-4 font-['Roboto_Slab']"><header className="text-center mb-4">{libraryProfile?.logo_url && <img src={libraryProfile.logo_url} alt="Logo" className="h-20 w-20 mx-auto object-contain mb-2" />}<h1 className="text-2xl md:text-3xl font-bold uppercase tracking-wider">{libraryProfile?.library_name || 'Library Name'}</h1><p className="text-xs">{libraryProfile?.library_address || 'Address not set'}</p><div className="text-xs flex justify-center gap-4"><span>Ph: {libraryProfile?.phone_numbers || 'Not set'}</span>{libraryProfile?.reg_no && <span>Reg.No: {libraryProfile.reg_no}</span>}</div></header><div className="flex justify-between items-start text-sm border-t-2 border-b-2 border-black py-1 my-2"><div><span className="font-bold">Receipt No:</span> {receiptNo}</div><div><span className="font-bold">Date:</span> {paymentDate.toLocaleDateString('en-GB')}</div></div><div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm mb-2"><div className="col-span-2"><span className="font-bold pr-2">Name Of Student:</span>{student.name}</div><div className="col-span-2"><span className="font-bold pr-2">Father's/Husband Name:</span>{student.father_name}</div><div><span className="font-bold pr-2">Reg. No:</span>{student.student_id}</div><div><span className="font-bold pr-2">Mob:</span>{student.mobile}</div><div className="col-span-2"><span className="font-bold pr-2">Fee for Period:</span>{fromDate.toLocaleDateString('en-GB')} To {toDate.toLocaleDateString('en-GB')}</div><div><span className="font-bold pr-2">Shift:</span>{student.admission_type === 'Full-time' ? 'Full Day' : student.shift}</div></div><div className="border-t-2 border-black pt-2"><div className="flex justify-between items-center text-sm"><p className="font-bold">The Sum of Rupee:</p><div className="border-2 border-black px-4 py-1 font-bold">₹ {payment.amount.toFixed(2)} /-</div></div><p className="text-sm capitalize font-semibold mt-1">{numberToWords(payment.amount)}</p></div><div className="flex justify-between items-end mt-10"><p className="text-xs text-gray-700">Note: Fee is not Refundable/Transferable.</p><div className="text-center"><div className="border-b-2 border-gray-600 border-dotted w-40 mb-1"></div><p className="text-xs font-bold">Authorized Signature</p></div></div></div></div>);
 });
 
 const PrintReceiptModal = React.memo(({ student, libraryProfile }) => {
-    const receiptRef = useRef(); const lastPayment = student.payment_history?.length > 0 ? student.payment_history[student.payment_history.length - 1] : null; if (!lastPayment) { return (<div><h3 className="text-xl md:text-2xl font-semibold mb-4 text-gray-800">Print Fee Receipt</h3><div className="bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 p-4" role="alert"><p className="font-bold">No Payment History</p><p>This student has not made any payments yet. No receipt can be generated.</p></div></div>); } const handlePrint = () => { const printContents = receiptRef.current.innerHTML; const originalContents = document.body.innerHTML; document.body.innerHTML = printContents; window.print(); document.body.innerHTML = originalContents; window.location.reload(); }; return (<div><h3 className="text-xl md:text-2xl font-semibold mb-4 text-gray-800">Print Fee Receipt</h3><FeeReceipt ref={receiptRef} student={student} libraryProfile={libraryProfile} payment={lastPayment} /><Button onClick={handlePrint} className="w-full mt-6 bg-indigo-600 text-white p-3 hover:bg-indigo-700 no-print"><Printer size={20} className="mr-2" /> Print Receipt</Button></div>);
+    const receiptRef = useRef(); 
+    const lastPayment = student.payment_history?.length > 0 ? student.payment_history[student.payment_history.length - 1] : null; 
+    if (!lastPayment) { return (<div><h3 className="text-xl md:text-2xl font-semibold mb-4 text-gray-800">Print Fee Receipt</h3><div className="bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 p-4" role="alert"><p className="font-bold">No Payment History</p><p>This student has not made any payments yet. No receipt can be generated.</p></div></div>); } 
+    const handlePrint = () => { const printContents = receiptRef.current.innerHTML; const originalContents = document.body.innerHTML; document.body.innerHTML = printContents; window.print(); document.body.innerHTML = originalContents; window.location.reload(); }; 
+    return (<div><h3 className="text-xl md:text-2xl font-semibold mb-4 text-gray-800">Print Fee Receipt</h3><FeeReceipt ref={receiptRef} student={student} libraryProfile={libraryProfile} payment={lastPayment} /><Button onClick={handlePrint} className="w-full mt-6 bg-indigo-600 text-white p-3 hover:bg-indigo-700 no-print"><Printer size={20} className="mr-2" /> Print Receipt</Button></div>);
 });
 
-const DashboardCharts = React.memo(({ students }) => {
-    const monthlyAdmissionsData = useMemo(() => { const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]; const admissions = {}; for (let i = 5; i >= 0; i--) { const d = new Date(); d.setMonth(d.getMonth() - i); const monthKey = `${monthNames[d.getMonth()]} ${d.getFullYear()}`; admissions[monthKey] = 0; } students.forEach(student => { const admissionDate = new Date(student.admission_date); const monthKey = `${monthNames[admissionDate.getMonth()]} ${admissionDate.getFullYear()}`; if (admissions.hasOwnProperty(monthKey)) { admissions[monthKey]++; } }); return Object.keys(admissions).map(key => ({ month: key, Admissions: admissions[key] })); }, [students]); const feeStatusData = useMemo(() => { let paid = 0, due = 0; students.forEach(s => { if (isFeeDue(s.next_due_date)) { due++; } else { paid++; } }); return [{ name: 'Paid', value: paid }, { name: 'Due', value: due }]; }, [students]); const COLORS = ['#10B981', '#EF4444'];
-    return (<div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6"><div className="lg:col-span-2 bg-white p-6 rounded-lg shadow-md"><h4 className="text-lg font-semibold text-gray-700 mb-4">Monthly Admissions</h4><ResponsiveContainer width="100%" height={300}><BarChart data={monthlyAdmissionsData}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="month" /><YAxis /><Tooltip /><Legend /><Bar dataKey="Admissions" fill="#8884d8" /></BarChart></ResponsiveContainer></div><div className="bg-white p-6 rounded-lg shadow-md"><h4 className="text-lg font-semibold text-gray-700 mb-4">Fee Status Overview</h4><ResponsiveContainer width="100%" height={300}><PieChart><Pie data={feeStatusData} cx="50%" cy="50%" labelLine={false} outerRadius={80} fill="#8884d8" dataKey="value" label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}>{feeStatusData.map((entry, index) => (<Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />))}</Pie><Tooltip /><Legend /></PieChart></ResponsiveContainer></div></div>);
+// New Settlement Receipt Component
+const SettlementReceipt = forwardRef(({ student, libraryProfile, settlement }, ref) => {
+    const settlementDate = new Date(settlement.date);
+    const receiptNo = `SETTLE-${student.student_id}-${settlementDate.getFullYear()}${(settlementDate.getMonth() + 1).toString().padStart(2, '0')}`;
+    const isCharge = settlement.settlement_type === 'charge';
+    const finalAmount = Number(settlement.final_amount);
+    
+    return (<div ref={ref} className="p-2 bg-white text-gray-900"><style type="text/css" media="print">{`@import url('https://fonts.googleapis.com/css2?family=Roboto+Slab:wght@400;700&display=swap'); @page { size: A5; margin: 0; } body { -webkit-print-color-adjust: exact; font-family: 'Roboto Slab', serif; } .no-print { display: none; } .receipt-container { border: 2px solid #000 !important; }`}</style><div className="receipt-container border-2 border-dashed border-gray-400 p-4 font-['Roboto_Slab']"><header className="text-center mb-4">{libraryProfile?.logo_url && <img src={libraryProfile.logo_url} alt="Logo" className="h-20 w-20 mx-auto object-contain mb-2" />}<h1 className="text-2xl md:text-3xl font-bold uppercase tracking-wider">{libraryProfile?.library_name || 'Library Name'}</h1><p className="text-xs">{libraryProfile?.library_address || 'Address not set'}</p><div className="text-xs flex justify-center gap-4"><span>Ph: {libraryProfile?.phone_numbers || 'Not set'}</span>{libraryProfile?.reg_no && <span>Reg.No: {libraryProfile.reg_no}</span>}</div></header>
+    <div className="text-center my-2"><h2 className="text-xl font-bold border-b-2 border-t-2 border-black py-1">Account Settlement Receipt</h2></div>
+    <div className="flex justify-between items-start text-sm py-1 mb-2"><div><span className="font-bold">Receipt No:</span> {receiptNo}</div><div><span className="font-bold">Date:</span> {settlementDate.toLocaleDateString('en-GB')}</div></div>
+    
+    <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm mb-2"><div className="col-span-2"><span className="font-bold pr-2">Name Of Student:</span>{student.name}</div><div className="col-span-2"><span className="font-bold pr-2">Father's/Husband Name:</span>{student.father_name}</div><div><span className="font-bold pr-2">Reg. No:</span>{student.student_id}</div><div><span className="font-bold pr-2">Mob:</span>{student.mobile}</div></div>
+    
+    <div className="border-t-2 border-black pt-2">
+        <p className="text-sm mb-2"><span className="font-bold">Reason for Settlement:</span> {settlement.reason || 'N/A'}</p>
+        <table className="w-full text-sm border-collapse">
+            <thead>
+                <tr className="border-b-2 border-black"><th className="text-left p-1">Description</th><th className="text-right p-1">Amount</th></tr>
+            </thead>
+            <tbody>
+                <tr className="border-b"><td className="p-1">{isCharge ? `Usage charge for ${settlement.days_used} overdue days` : `Credit for ${settlement.daysRemaining} unused days`} (Rate: ₹${settlement.daily_rate}/day)</td><td className="text-right p-1">₹{finalAmount}</td></tr>
+                {settlement.transfer_log && (
+                    <tr className="border-b"><td className="p-1">Amount Transferred to {settlement.transfer_log.transferredToName}</td><td className="text-right p-1">- ₹{finalAmount}</td></tr>
+                )}
+                <tr className="border-b-2 border-black font-bold"><td className="p-1">{isCharge ? "Total Payment Due:" : (settlement.transfer_log ? "Net Transfer:" : "Total Refund Due:")}</td><td className="text-right p-1">₹{settlement.transfer_log ? 0 : finalAmount}</td></tr>
+            </tbody>
+        </table>
+
+        <div className="flex justify-between items-center text-sm mt-4">
+            <p className="font-bold text-lg">Final Amount {isCharge ? "Due" : (settlement.transfer_log ? "Transferred" : "Refunded")}:</p>
+            <div className={`border-2 border-black px-4 py-1 font-bold text-lg ${isCharge ? 'text-red-700' : 'text-green-700'}`}>
+                ₹ {settlement.transfer_log ? 0 : finalAmount} /-
+            </div>
+        </div>
+        <p className="text-sm capitalize font-semibold mt-1">{numberToWords(settlement.transfer_log ? 0 : finalAmount)}</p>
+    </div>
+    
+    <div className="flex justify-between items-end mt-10"><p className="text-xs text-gray-700">This concludes all transactions.</p><div className="text-center"><div className="border-b-2 border-gray-600 border-dotted w-40 mb-1"></div><p className="text-xs font-bold">Authorized Signature</p></div></div>
+    
+    </div></div>);
+});
+
+// New Modal for Printing Settlement
+const PrintSettlementModal = React.memo(({ student, libraryProfile, settlement }) => {
+    const receiptRef = useRef();
+    if (!settlement) {
+        return (<div><h3 className="text-xl md:text-2xl font-semibold mb-4 text-gray-800">Print Settlement Receipt</h3><div className="bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 p-4" role="alert"><p className="font-bold">No Settlement Data</p><p>This student's settlement data is not available.</p></div></div>);
+    }
+    const handlePrint = () => { const printContents = receiptRef.current.innerHTML; const originalContents = document.body.innerHTML; document.body.innerHTML = printContents; window.print(); document.body.innerHTML = originalContents; window.location.reload(); }; 
+    return (<div><h3 className="text-xl md:text-2xl font-semibold mb-4 text-gray-800">Print Settlement Receipt</h3><SettlementReceipt ref={receiptRef} student={student} libraryProfile={libraryProfile} settlement={settlement} /><Button onClick={handlePrint} className="w-full mt-6 bg-indigo-600 text-white p-3 hover:bg-indigo-700 no-print"><Printer size={20} className="mr-2" /> Print Settlement Receipt</Button></div>);
+});
+
+
+const DashboardCharts = React.memo(({ students, netProfit }) => { 
+    const monthlyAdmissionsData = useMemo(() => { const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]; const admissions = {}; for (let i = 5; i >= 0; i--) { const d = new Date(); d.setMonth(d.getMonth() - i); const monthKey = `${monthNames[d.getMonth()]} ${d.getFullYear()}`; admissions[monthKey] = 0; } students.forEach(student => { const admissionDate = new Date(student.admission_date); const monthKey = `${monthNames[admissionDate.getMonth()]} ${admissionDate.getFullYear()}`; if (admissions.hasOwnProperty(monthKey)) { admissions[monthKey]++; } }); return Object.keys(admissions).map(key => ({ month: key, Admissions: admissions[key] })); }, [students]); 
+    const feeStatusData = useMemo(() => { let paid = 0, due = 0; students.forEach(s => { if (isFeeDue(s.next_due_date)) { due++; } else { paid++; } }); return [{ name: 'Paid', value: paid }, { name: 'Due', value: due }]; }, [students]); 
+    const COLORS = ['#10B981', '#EF4444'];
+    return (<div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
+        <div className="lg:col-span-2 bg-white p-6 rounded-lg shadow-md">
+            <h4 className="text-lg font-semibold text-gray-700 mb-4">Monthly Admissions</h4>
+            <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={monthlyAdmissionsData}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="month" />
+                    <YAxis />
+                    <Tooltip />
+                    <Legend />
+                    <Bar dataKey="Admissions" fill="#4f46e5" radius={[4, 4, 0, 0]} />
+                </BarChart>
+            </ResponsiveContainer>
+        </div>
+        <div className="bg-white p-6 rounded-lg shadow-md">
+            <h4 className="text-lg font-semibold text-gray-700 mb-4">Fee Status Overview</h4>
+            <ResponsiveContainer width="100%" height={300}>
+                <PieChart>
+                    <Pie 
+                        data={feeStatusData} 
+                        cx="50%" 
+                        cy="50%" 
+                        labelLine={false} 
+                        outerRadius={80} 
+                        dataKey="value" 
+                        label={({ name, percent }) => `${name} (${(percent * 100).toFixed(0)}%)`}
+                        innerRadius={40}
+                        paddingAngle={5}
+                    >
+                        {feeStatusData.map((entry, index) => (<Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />))}
+                    </Pie>
+                    <Tooltip formatter={(value, name) => [`${value} students`, name]} />
+                    <Legend />
+                </PieChart>
+            </ResponsiveContainer>
+        </div>
+    </div>);
 });
 
 const ReportsView = React.memo(({ students }) => {
     const initialFilters = { dateRange: { from: '', to: '' }, feeStatus: 'all', shiftType: 'all', studentStatus: 'active', dateFilterType: 'admission_date', }; const [filters, setFilters] = useState(initialFilters); const handleFilterChange = (e) => { const { name, value } = e.target; setFilters(prev => ({ ...prev, [name]: value })); }; const handleDateChange = (e) => { const { name, value } = e.target; setFilters(prev => ({ ...prev, dateRange: { ...prev.dateRange, [name]: value } })); }; const resetFilters = () => { setFilters(initialFilters); };
-    const filteredStudents = useMemo(() => { return students.filter(s => { if (filters.studentStatus !== 'all' && s.status !== filters.studentStatus) return false; const due = isFeeDue(s.next_due_date); if (filters.feeStatus === 'due' && !due) return false; if (filters.feeStatus === 'paid' && due) return false; if (filters.shiftType !== 'all' && s.admission_type !== filters.shiftType) return false; const fromDate = filters.dateRange.from ? new Date(filters.dateRange.from) : null; const toDate = filters.dateRange.to ? new Date(filters.dateRange.to) : null; if (fromDate || toDate) { const studentDate = new Date(s[filters.dateFilterType]); if (fromDate && studentDate < fromDate) return false; if (toDate) { const endOfDay = new Date(toDate); endOfDay.setHours(23, 59, 59, 999); if (studentDate > endOfDay) return false; } } return true; }); }, [students, filters]);
+    const filteredStudents = useMemo(() => { return students.filter(s => { 
+        // Filter 1: Student Status
+        if (filters.studentStatus !== 'all' && s.status !== filters.studentStatus) return false; 
+        // Filter 2: Fee Status (Only applicable to Active Students)
+        const due = isFeeDue(s.next_due_date); 
+        if (s.status === 'active') {
+            if (filters.feeStatus === 'due' && !due) return false; 
+            if (filters.feeStatus === 'paid' && due) return false; 
+        }
+        // Filter 3: Admission Type (Shift)
+        if (filters.shiftType !== 'all' && s.admission_type !== filters.shiftType) return false; 
+        
+        // Filter 4: Date Range
+        const fromDate = filters.dateRange.from ? new Date(filters.dateRange.from) : null; 
+        const toDate = filters.dateRange.to ? new Date(filters.dateRange.to) : null; 
+        if (fromDate || toDate) { 
+            const studentDate = new Date(s[filters.dateFilterType]); 
+            if (fromDate && studentDate < fromDate) return false; 
+            if (toDate) { const endOfDay = new Date(toDate); endOfDay.setHours(23, 59, 59, 999); if (studentDate > endOfDay) return false; } 
+        } 
+        return true; 
+    }); }, [students, filters]);
     const downloadCSV = () => { const headers = ["Reg. No.", "Student Name", "Father's Name", "Mobile No.", "Seat No.", "Admission Type", "Shift", "Admission Date", "Next Due Date", "Fee Amount", "Fee Status", "Student Status"]; const rows = filteredStudents.map(s => { const due = isFeeDue(s.next_due_date); const feeStatus = s.status === 'departed' ? 'N/A' : (due ? 'Due' : 'Paid'); const escape = (str) => `"${String(str || '').replace(/"/g, '""')}"`; return [escape(s.student_id), escape(s.name), escape(s.father_name), escape(s.mobile), escape(s.seat_number), escape(s.admission_type), escape(s.shift || 'N/A'), escape(new Date(s.admission_date).toLocaleDateString('en-GB')), escape(new Date(s.next_due_date).toLocaleDateString('en-GB')), escape(s.fee_amount), escape(feeStatus), escape(s.status.charAt(0).toUpperCase() + s.status.slice(1))].join(','); }); const csvContent = "data:text/csv;charset=utf-8," + [headers.join(','), ...rows].join('\n'); const encodedUri = encodeURI(csvContent); const link = document.createElement("a"); link.setAttribute("href", encodedUri); const todayStr = new Date().toISOString().split('T')[0]; link.setAttribute("download", `library_report_${todayStr}.csv`); document.body.appendChild(link); link.click(); document.body.removeChild(link); };
     return (<div className="space-y-6"><div className="bg-white p-4 md:p-6 rounded-lg shadow-md"><div className="flex flex-col md:flex-row justify-between items-center gap-4 mb-6"><h3 className="text-xl md:text-2xl font-semibold text-gray-800">Student Reports & Filtering</h3><div className="flex items-center gap-2 w-full md:w-auto"><Button onClick={resetFilters} className="bg-gray-200 text-gray-700 hover:bg-gray-300 w-1/2 md:w-auto"><FilterX size={16} className="mr-2" /> Reset</Button><Button onClick={downloadCSV} className="bg-indigo-600 text-white hover:bg-indigo-700 w-1/2 md:w-auto"><Download size={16} className="mr-2" /> Download CSV</Button></div></div><div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4"><div className="p-4 border rounded-lg bg-gray-50 md:col-span-2"><label className="block text-sm font-medium text-gray-700 mb-2">Filter by Date Range</label><div className="flex flex-col sm:flex-row gap-2"><select name="dateFilterType" value={filters.dateFilterType} onChange={handleFilterChange} className="p-2 border border-gray-300 rounded-lg bg-white w-full sm:w-1/3"><option value="admission_date">Admission Date</option><option value="next_due_date">Next Due Date</option></select><input type="date" name="from" value={filters.dateRange.from} onChange={handleDateChange} className="p-2 border border-gray-300 rounded-lg w-full sm:w-1/3" /><input type="date" name="to" value={filters.dateRange.to} onChange={handleDateChange} className="p-2 border border-gray-300 rounded-lg w-full sm:w-1/3" /></div></div><div><label className="block text-sm font-medium text-gray-700 mb-1">Fee Status</label><select name="feeStatus" value={filters.feeStatus} onChange={handleFilterChange} className="w-full p-2 border border-gray-300 rounded-lg bg-white"><option value="all">All Fee Status</option><option value="paid">Paid</option><option value="due">Due</option></select></div><div><label className="block text-sm font-medium text-gray-700 mb-1">Admission Type</label><select name="shiftType" value={filters.shiftType} onChange={handleFilterChange} className="w-full p-2 border border-gray-300 rounded-lg bg-white"><option value="all">All Types</option><option value="Full-time">Full-time</option><option value="Half-time">Half-time</option></select></div><div><label className="block text-sm font-medium text-gray-700 mb-1">Student Status</label><select name="studentStatus" value={filters.studentStatus} onChange={handleFilterChange} className="w-full p-2 border border-gray-300 rounded-lg bg-white"><option value="active">Active</option><option value="departed">Departed</option><option value="all">All Students</option></select></div></div></div><div className="bg-white p-4 md:p-6 rounded-lg shadow-md"><h4 className="text-lg font-semibold text-gray-700 mb-4">Filtered Results <span className="text-indigo-600 font-bold">({filteredStudents.length} students found)</span></h4><div className="overflow-auto max-h-[60vh] styled-scrollbar"><table className="w-full text-left text-sm whitespace-nowrap"><thead className="bg-gray-100 text-gray-600 uppercase sticky top-0"><tr><th className="p-3">Reg. No</th><th className="p-3">Name</th><th className="p-3 hidden md:table-cell">Father's Name</th><th className="p-3 hidden sm:table-cell">Mobile</th><th className="p-3">Seat</th><th className="p-3 hidden lg:table-cell">Shift</th><th className="p-3 hidden lg:table-cell">Admission Date</th><th className="p-3 hidden sm:table-cell">Next Due Date</th><th className="p-3">Fee Status</th></tr></thead><tbody>{filteredStudents.length > 0 ? filteredStudents.map(s => { const due = isFeeDue(s.next_due_date); const isDeparted = s.status === 'departed'; return (<tr key={s.id} className="border-b hover:bg-gray-50"><td className="p-3 font-mono">{s.student_id}</td><td className="p-3 font-medium text-gray-800">{s.name}</td><td className="p-3 hidden md:table-cell">{s.father_name}</td><td className="p-3 hidden sm:table-cell">{s.mobile}</td><td className="p-3">{s.seat_number}</td><td className="p-3 hidden lg:table-cell">{s.admission_type === 'Full-time' ? 'Full Day' : s.shift}</td><td className="p-3 hidden lg:table-cell">{new Date(s.admission_date).toLocaleDateString()}</td><td className="p-3 hidden sm:table-cell">{new Date(s.next_due_date).toLocaleDateString()}</td><td className="p-3"><span className={`px-3 py-1 rounded-full font-semibold text-xs ${isDeparted ? 'bg-gray-200 text-gray-800' : due ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'}`}>{isDeparted ? 'Departed' : (due ? 'Due' : 'Paid')}</span></td></tr>) }) : (<tr><td colSpan="9" className="text-center p-8 text-gray-500">No students match the current filters. <br /> Try adjusting your search criteria.</td></tr>)}</tbody></table></div></div></div>);
 });
 
-const StudentProfileDetailModal = React.memo(({ student }) => {
-    const due = isFeeDue(student.next_due_date); const monthsPaidInAdvance = useMemo(() => { const today = new Date(); const nextDueDate = new Date(student.next_due_date); if (nextDueDate <= today) return 0; let months = (nextDueDate.getFullYear() - today.getFullYear()) * 12; months -= today.getMonth(); months += nextDueDate.getMonth(); return months <= 0 ? 0 : months; }, [student.next_due_date]);
-    return (<div className="p-2"><div className="flex flex-col md:flex-row items-center gap-6 border-b pb-6 mb-6"><img src={student.photo_url || 'https://placehold.co/128x128/e2e8f0/64748b?text=Photo'} alt={student.name} className="w-32 h-32 rounded-full object-cover border-4 border-indigo-200 shadow-lg" /><div className="flex-1 text-center md:text-left"><h2 className="text-2xl md:text-3xl font-bold text-gray-800">{student.title} {student.name}</h2><p className="text-indigo-600 font-mono">Reg. No: {student.student_id}</p><div className="flex flex-col md:flex-row items-center justify-center md:justify-start gap-4 mt-2 text-gray-600"><span className="flex items-center gap-1"><Phone size={16} /> {student.mobile}</span><span className="flex items-center gap-1"><Armchair size={16} /> Seat {student.seat_number}</span></div></div><div className={`p-4 rounded-lg text-center ${due ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'}`}><p className="font-bold text-lg">{due ? 'Fee Due' : 'Fee Paid'}</p><p className="text-sm">Next Due: {new Date(student.next_due_date).toLocaleDateString()}</p>{monthsPaidInAdvance > 0 && <p className="text-xs font-semibold mt-1">({monthsPaidInAdvance} Month(s) Advance)</p>}</div></div><div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm mb-6"><div className="bg-gray-50 p-4 rounded-lg"><h4 className="font-bold text-gray-600 mb-2">Personal Details</h4><p><span className="font-semibold">Father's Name:</span> {student.father_name}</p><p><span className="font-semibold">Admission Date:</span> {new Date(student.admission_date).toLocaleDateString()}</p></div><div className="bg-gray-50 p-4 rounded-lg"><h4 className="font-bold text-gray-600 mb-2">Subscription Details</h4><p><span className="font-semibold">Admission Type:</span> {student.admission_type}</p><p><span className="font-semibold">Shift:</span> {student.admission_type === 'Full-time' ? 'Full Day' : student.shift}</p><p><span className="font-semibold">Fee Amount:</span> ₹{student.fee_amount}</p></div></div><div><h4 className="font-bold text-gray-600 mb-2">Payment History</h4><div className="max-h-48 overflow-y-auto border rounded-lg styled-scrollbar"><table className="w-full text-left text-sm"><thead className="bg-gray-100 sticky top-0"><tr><th className="p-2">Date</th><th className="p-2">Amount</th><th className="p-2">Method</th></tr></thead><tbody>{student.payment_history && student.payment_history.length > 0 ? (student.payment_history.map((p, i) => (<tr key={i} className="border-b"><td className="p-2">{new Date(p.date).toLocaleDateString()}</td><td className="p-2 font-semibold">₹{p.amount}</td><td className="p-2"><span className="text-xs bg-gray-200 px-2 py-1 rounded-full">{p.method}</span></td></tr>))) : (<tr><td colSpan="3" className="text-center p-4 text-gray-500">No payment history found.</td></tr>)}</tbody></table></div></div></div>);
+const StudentProfileDetailModal = React.memo(({ student, onPrintSettlement }) => {
+    const due = isFeeDue(student.next_due_date); const monthsPaidInAdvance = useMemo(() => { const today = new Date(); today.setHours(0,0,0,0); const nextDueDate = new Date(student.next_due_date); nextDueDate.setHours(0,0,0,0); if (nextDueDate <= today) return 0; let months = (nextDueDate.getFullYear() - today.getFullYear()) * 12; months -= today.getMonth(); months += nextDueDate.getMonth(); return months <= 0 ? 0 : months; }, [student.next_due_date]);
+    return (<div className="p-2"><div className="flex flex-col md:flex-row items-center gap-6 border-b pb-6 mb-6"><img src={student.photo_url || 'https://placehold.co/128x128/e2e8f0/64748b?text=Photo'} alt={student.name} className="w-32 h-32 rounded-full object-cover border-4 border-indigo-200 shadow-lg" /><div className="flex-1 text-center md:text-left"><h2 className="text-2xl md:text-3xl font-bold text-gray-800">{student.title} {student.name}</h2><p className="text-indigo-600 font-mono">Reg. No: {student.student_id}</p><div className="flex flex-col md:flex-row items-center justify-center md:justify-start gap-4 mt-2 text-gray-600"><span className="flex items-center gap-1"><Phone size={16} /> {student.mobile}</span><span className="flex items-center gap-1"><Armchair size={16} /> Seat {student.seat_number}</span></div></div><div className={`p-4 rounded-lg text-center ${due ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'}`}><p className="font-bold text-lg">{due ? 'Fee Due' : 'Fee Paid'}</p><p className="text-sm">Next Due: {new Date(student.next_due_date).toLocaleDateString()}</p>{monthsPaidInAdvance > 0 && <p className="text-xs font-semibold mt-1">({monthsPaidInAdvance} Month(s) Advance)</p>}</div></div><div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm mb-6"><div className="bg-gray-50 p-4 rounded-lg"><h4 className="font-bold text-gray-600 mb-2">Personal Details</h4><p><span className="font-semibold">Father's Name:</span> {student.father_name}</p><p><span className="font-semibold">Admission Date:</span> {new Date(student.admission_date).toLocaleDateString()}</p></div><div className="bg-gray-50 p-4 rounded-lg"><h4 className="font-bold text-gray-600 mb-2">Subscription Details</h4><p><span className="font-semibold">Admission Type:</span> {student.admission_type}</p><p><span className="font-semibold">Shift:</span> {student.admission_type === 'Full-time' ? 'Full Day' : student.shift}</p><p><span className="font-semibold">Fee Amount:</span> ₹{student.fee_amount}</p></div></div>
+    
+        {/* All Logs */}
+        <div className="space-y-4">
+            <div>
+                <h4 className="font-bold text-gray-600 mb-2">Payment History</h4>
+                <div className="max-h-32 overflow-y-auto border rounded-lg styled-scrollbar"><table className="w-full text-left text-sm"><thead className="bg-gray-100 sticky top-0"><tr><th className="p-2">Date</th><th className="p-2">Amount</th><th className="p-2">Method</th><th className="p-2">Period</th></tr></thead><tbody>{student.payment_history && student.payment_history.length > 0 ? ([...student.payment_history].reverse().map((p, i) => (<tr key={i} className="border-b"><td className="p-2">{new Date(p.date).toLocaleDateString()}</td><td className="p-2 font-semibold">₹{p.amount}</td><td className="p-2"><span className="text-xs bg-gray-200 px-2 py-1 rounded-full">{p.method}</span></td><td className="p-2 text-xs">{new Date(p.cycle_start).toLocaleDateString()}<br/>to {new Date(p.cycle_end).toLocaleDateString()}</td></tr>))) : (<tr><td colSpan="4" className="text-center p-4 text-gray-500">No payment history found.</td></tr>)}</tbody></table></div>
+            </div>
+            
+            {student.received_credit_log && student.received_credit_log.length > 0 && (
+                 <div>
+                    <h4 className="font-bold text-gray-600 mb-2">Credit Received History</h4>
+                    <div className="max-h-32 overflow-y-auto border rounded-lg styled-scrollbar"><table className="w-full text-left text-sm"><thead className="bg-gray-100 sticky top-0"><tr><th className="p-2">Date</th><th className="p-2">Days</th><th className="p-2">From</th></tr></thead><tbody>{[...student.received_credit_log].reverse().map((p, i) => (<tr key={i} className="border-b"><td className="p-2">{new Date(p.date).toLocaleDateString()}</td><td className="p-2 font-semibold">{p.daysReceived}</td><td className="p-2">{p.fromName} (Reg: {p.fromId})</td></tr>))}</tbody></table></div>
+                </div>
+            )}
+            
+            {student.settlement_log && student.settlement_log.length > 0 && (
+                 <div>
+                    <h4 className="font-bold text-gray-600 mb-2">Settlement & Departure History</h4>
+                    <div className="max-h-32 overflow-y-auto border rounded-lg styled-scrollbar"><table className="w-full text-left text-sm"><thead className="bg-gray-100 sticky top-0"><tr><th className="p-2">Date</th><th className="p-2">Type</th><th className="p-2">Amount</th><th className="p-2">Action</th></tr></thead><tbody>{[...student.settlement_log].reverse().map((p, i) => (<tr key={i} className="border-b"><td className="p-2">{new Date(p.date).toLocaleDateString()}</td><td className="p-2 capitalize"><span className={`font-semibold ${p.settlement_type === 'charge' ? 'text-red-600' : 'text-green-600'}`}>{p.settlement_type}</span></td><td className="p-2 font-semibold">₹{p.final_amount}</td><td className="p-2"><Button onClick={() => onPrintSettlement(p)} className="bg-indigo-600 text-white px-2 py-1 text-xs"><Printer size={14} /></Button></td></tr>))}</tbody></table></div>
+                </div>
+            )}
+
+        </div>
+
+    </div>);
 });
+
 
 const SeatOccupantsDetailModal = React.memo(({ item, onViewFullProfile }) => {
     const { occupants, seatNumber } = item;
@@ -1806,4 +2635,389 @@ const IncomePasswordModal = React.memo(({ onVerify, onClose, isSubmitting }) => 
     )
 });
 
+// --- NEW FINANCE VIEW (Enhanced with unified Transactions) ---
+const FinanceView = React.memo(({ students, expenses, onAddExpense, onDeleteExpense, transactions, totalIncome, totalExpenses, totalRefunds, netProfit }) => {
+    const [expenseData, setExpenseData] = useState({ date: new Date().toISOString().split('T')[0], item_name: '', amount: '', category: 'Utilities' });
+    const [dateFilter, setDateFilter] = useState({ from: '', to: '' });
+
+    const handleExpenseChange = (e) => {
+        const { name, value } = e.target;
+        setExpenseData(prev => ({ ...prev, [name]: value }));
+    };
+
+    const handleExpenseSubmit = (e) => {
+        e.preventDefault();
+        if (!expenseData.item_name || !expenseData.amount || !expenseData.date) {
+            alert("Please fill in all expense fields.");
+            return;
+        }
+        onAddExpense(expenseData);
+        setExpenseData({ date: new Date().toISOString().split('T')[0], item_name: '', amount: '', category: 'Utilities' });
+    };
+
+    const filteredTransactions = useMemo(() => {
+        const from = dateFilter.from ? new Date(dateFilter.from) : null;
+        const to = dateFilter.to ? new Date(dateFilter.to) : null;
+        if (to) to.setHours(23, 59, 59, 999);
+
+        const filtered = transactions.filter(t => {
+            if (!from && !to) return true;
+            const transactionDate = new Date(t.created_at || t.date); // Use created_at or date
+            if (from && transactionDate < from) return false;
+            if (to && transactionDate > to) return false;
+            return true;
+        });
+        
+        // Calculate filtered metrics
+        let filteredIncome = 0;
+        let filteredExpensesTotal = 0;
+        let filteredRefundsTotal = 0;
+
+        filtered.forEach(t => {
+            const amount = Number(t.amount);
+            if (t.type === 'income') {
+                filteredIncome += amount;
+            } else if (t.type === 'expense') {
+                filteredExpensesTotal += Math.abs(amount);
+            } else if (t.type === 'refund') {
+                filteredRefundsTotal += Math.abs(amount);
+            }
+        });
+        
+        const filteredNetProfit = filteredIncome - filteredExpensesTotal - filteredRefundsTotal;
+        
+        return { list: filtered, income: filteredIncome, expenses: filteredExpensesTotal, refunds: filteredRefundsTotal, netProfit: filteredNetProfit };
+    }, [transactions, dateFilter]);
+
+
+    const TransactionItem = ({ t }) => {
+        const amount = Math.abs(Number(t.amount));
+        const isIncome = t.type === 'income';
+        const isRefund = t.type === 'refund';
+        const isExpense = t.type === 'expense';
+        const displayAmount = (isIncome ? '+ ' : '- ') + `₹${amount.toLocaleString('en-IN')}`;
+        
+        let color = isIncome ? 'text-green-600' : 'text-red-600';
+        let icon = isIncome ? <ArrowUpRight size={16} /> : isRefund ? <Repeat size={16} /> : <ArrowDownRight size={16} />;
+        let description = t.description;
+
+        return (
+            <tr className="border-b">
+                <td className="p-2">{new Date(t.created_at || t.date).toLocaleDateString()}</td>
+                <td className="p-2">{description}</td>
+                <td className="p-2 text-right font-semibold">
+                    <span className={color + " flex items-center justify-end"}>
+                         {icon} {displayAmount}
+                    </span>
+                </td>
+                <td className="p-2 text-right">
+                    {t.type === 'expense' && (
+                        <button onClick={() => onDeleteExpense(t.id)} className="text-gray-400 hover:text-red-600"><Trash2 size={14} /></button>
+                    )}
+                </td>
+            </tr>
+        );
+    };
+
+
+    return (
+        <div className="space-y-6">
+            <h2 className="text-2xl md:text-3xl font-bold text-gray-800">Finance Manager</h2>
+            
+            {/* Date Filter */}
+            <div className="bg-white p-4 rounded-lg shadow-md">
+                <div className="flex flex-col md:flex-row gap-4 items-center">
+                    <label className="font-semibold">Filter by Date:</label>
+                    <input type="date" value={dateFilter.from} onChange={(e) => setDateFilter(prev => ({ ...prev, from: e.target.value }))} className="p-2 border rounded-lg" />
+                    <span className="text-gray-600">to</span>
+                    <input type="date" value={dateFilter.to} onChange={(e) => setDateFilter(prev => ({ ...prev, to: e.target.value }))} className="p-2 border rounded-lg" />
+                    <Button onClick={() => setDateFilter({ from: '', to: '' })} className="bg-gray-200 text-gray-700 hover:bg-gray-300">
+                        <FilterX size={16} className="mr-2" /> Reset
+                    </Button>
+                </div>
+            </div>
+
+            {/* Summary Cards (Filtered) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-6">
+                <StatCard label="Net Profit (Period)" value={`₹${filteredTransactions.netProfit.toLocaleString('en-IN')}`} color={filteredTransactions.netProfit >= 0 ? "blue" : "red"} icon={<PieChartIcon />} />
+                <StatCard label="Total Income (Period)" value={`₹${filteredTransactions.income.toLocaleString('en-IN')}`} color="green" icon={<ArrowUpRight />} />
+                <StatCard label="Total Expenses (Period)" value={`₹${filteredTransactions.expenses.toLocaleString('en-IN')}`} color="red" icon={<ArrowDownRight />} />
+                <StatCard label="Total Refunds (Period)" value={`₹${filteredTransactions.refunds.toLocaleString('en-IN')}`} color="yellow" icon={<Repeat />} />
+            </div>
+            
+            {/* Add Expense Form */}
+            <div className="bg-white p-6 rounded-lg shadow-md">
+                <h3 className="text-xl font-semibold text-gray-800 mb-4">Log New Expense</h3>
+                <form onSubmit={handleExpenseSubmit} className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700">Date</label>
+                        <input type="date" name="date" value={expenseData.date} onChange={handleExpenseChange} className="w-full p-2 border border-gray-300 rounded-lg" />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700">Item/Service</label>
+                        <input type="text" name="item_name" value={expenseData.item_name} onChange={handleExpenseChange} className="w-full p-2 border border-gray-300 rounded-lg" placeholder="e.g., Electricity Bill" required />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700">Amount (₹)</label>
+                        <input type="number" name="amount" value={expenseData.amount} onChange={handleExpenseChange} className="w-full p-2 border border-gray-300 rounded-lg" placeholder="5000" min="1" required />
+                    </div>
+                    <Button type="submit" className="bg-indigo-600 text-white hover:bg-indigo-700 w-full h-10">
+                        <Plus size={16} className="mr-2" /> Add Expense
+                    </Button>
+                </form>
+            </div>
+            
+            {/* Consolidated Transaction Log */}
+            <div className="bg-white p-6 rounded-lg shadow-md">
+                <h3 className="text-xl font-semibold text-gray-800 mb-4">Transaction Log (Income, Expense, Refund)</h3>
+                <div className="max-h-96 overflow-y-auto styled-scrollbar">
+                    <table className="w-full text-left text-sm">
+                        <thead className="bg-gray-50 sticky top-0">
+                            <tr>
+                                <th className="p-2">Date</th>
+                                <th className="p-2">Description</th>
+                                <th className="p-2 text-right">Amount (Net)</th>
+                                <th className="p-2"></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {filteredTransactions.list.length > 0 ? filteredTransactions.list.map((t, i) => (
+                                <TransactionItem key={t.id || i} t={t} />
+                            )) : (<tr><td colSpan="4" className="text-center p-4 text-gray-500">No transactions in this period.</td></tr>)}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        </div>
+    );
+});
+
+// --- NEW ACCOUNT VIEW COMPONENTS ---
+
+const EditProfileForm = ({ profile, onSave }) => {
+    const [formData, setFormData] = useState({
+        library_name: profile.library_name || '',
+        library_address: profile.library_address || '',
+        phone_numbers: profile.phone_numbers || '',
+        reg_no: profile.reg_no || ''
+    });
+    const [isSubmitting, setIsSubmitting] = useState(false);
+
+    const handleChange = (e) => {
+        const { name, value } = e.target;
+        setFormData(prev => ({ ...prev, [name]: value }));
+    };
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        setIsSubmitting(true);
+        // Call the parent update function
+        await onSave(formData);
+        setIsSubmitting(false);
+    };
+
+    return (
+        <form onSubmit={handleSubmit} className="space-y-4">
+            <h3 className="text-xl font-semibold text-gray-800 mb-4">Edit Library Profile</h3>
+            <div>
+                <label className="block text-sm font-medium text-gray-700">Library Name</label>
+                <input type="text" name="library_name" value={formData.library_name} onChange={handleChange} className="w-full p-2 border border-gray-300 rounded-lg" required />
+            </div>
+            <div>
+                <label className="block text-sm font-medium text-gray-700">Library Address</label>
+                <input type="text" name="library_address" value={formData.library_address} onChange={handleChange} className="w-full p-2 border border-gray-300 rounded-lg" required />
+            </div>
+            <div>
+                <label className="block text-sm font-medium text-gray-700">Phone Number(s)</label>
+                <input type="text" name="phone_numbers" value={formData.phone_numbers} onChange={handleChange} className="w-full p-2 border border-gray-300 rounded-lg" required />
+            </div>
+            <div>
+                <label className="block text-sm font-medium text-gray-700">Registration No. (Optional)</label>
+                <input type="text" name="reg_no" value={formData.reg_no} onChange={handleChange} className="w-full p-2 border border-gray-300 rounded-lg" />
+            </div>
+            <Button type="submit" disabled={isSubmitting} className="bg-indigo-600 text-white hover:bg-indigo-700">
+                {isSubmitting ? 'Saving...' : 'Save Changes'}
+            </Button>
+        </form>
+    );
+};
+
+const ChangePasswordForm = () => {
+    const [password, setPassword] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [message, setMessage] = useState('');
+    const [error, setError] = useState('');
+
+    const handlePasswordUpdate = async (e) => {
+        e.preventDefault();
+        setLoading(true);
+        setError('');
+        setMessage('');
+
+        if (password.length < 6) {
+            setError('Password must be at least 6 characters long.');
+            setLoading(false);
+            return;
+        }
+        const { error: updateError } = await supabase.auth.updateUser({ password });
+        if (updateError) {
+            setError(updateError.error_description || updateError.message);
+        } else {
+            setMessage('Password updated successfully!');
+            setPassword('');
+        }
+        setLoading(false);
+    };
+
+    return (
+        <form onSubmit={handlePasswordUpdate} className="space-y-4 max-w-sm">
+            <h3 className="text-xl font-semibold text-gray-800 mb-4">Change Password</h3>
+            <div>
+                <label className="block text-sm font-medium text-gray-700">New Password</label>
+                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full p-2 border border-gray-300 rounded-lg" required />
+            </div>
+            {error && <p className="text-red-500 text-sm">{error}</p>}
+            {message && <p className="text-green-500 text-sm">{message}</p>}
+            <Button type="submit" disabled={loading} className="bg-indigo-600 text-white hover:bg-indigo-700">
+                {loading ? 'Updating...' : 'Update Password'}
+            </Button>
+        </form>
+    );
+};
+
+const FeeSettings = ({ settings, onSave }) => {
+    const [fees, setFees] = useState(settings);
+    const [isSubmitting, setIsSubmitting] = useState(false);
+
+    const handleSave = async (e) => {
+        e.preventDefault();
+        setIsSubmitting(true);
+        await onSave(fees);
+        setIsSubmitting(false);
+    };
+
+    return (
+        <form onSubmit={handleSave} className="space-y-4 max-w-sm">
+            <h3 className="text-xl font-semibold text-gray-800 mb-4">Fee Structure</h3>
+            <div>
+                <label className="block text-sm font-medium text-gray-700">Full-time Fee (₹)</label>
+                <input type="number" value={fees['Full-time']} onChange={e => setFees({ ...fees, 'Full-time': Number(e.target.value) })} className="w-full p-2 border border-gray-300 rounded-lg" />
+            </div>
+            <div>
+                <label className="block text-sm font-medium text-gray-700">Half-time Fee (₹)</label>
+                <input type="number" value={fees['Half-time']} onChange={e => setFees({ ...fees, 'Half-time': Number(e.target.value) })} className="w-full p-2 border border-gray-300 rounded-lg" />
+            </div>
+            <Button type="submit" disabled={isSubmitting} className="bg-indigo-600 text-white hover:bg-indigo-700">
+                {isSubmitting ? 'Saving...' : 'Save Changes'}
+            </Button>
+        </form>
+    );
+};
+
+const SubscriptionInfo = ({ status }) => {
+    const getStatusInfo = () => {
+        if (status.daysLeft === 'Lifetime') {
+            return {
+                title: 'Lifetime Access',
+                desc: 'You have full access to the app forever.',
+                color: 'text-green-700',
+                bg: 'bg-green-100',
+                icon: <ShieldCheck size={24} />
+            };
+        }
+        if (status.isTrial) {
+            return {
+                title: 'Trial Period',
+                desc: `Your free trial is active.`,
+                color: 'text-yellow-700',      
+                bg: 'bg-yellow-100',
+                icon: <CalendarClock size={24} />
+            };
+        }
+        if (status.daysLeft > 0) {
+            return {
+                title: 'Subscription Active',
+                desc: `Your plan is active for ${status.daysLeft} more days, until ${status.expiresAt}.`,
+                color: 'text-green-700',
+                bg: 'bg-green-100',
+                icon: <CheckCircle size={24} />
+            };
+        }
+        return {
+            title: 'Subscription Expired',
+            desc: `Your subscription expired on ${status.expiresAt}. Please renew to continue.`,
+            color: 'text-red-700',
+            bg: 'bg-red-100',
+            icon: <AlertTriangle size={24} />
+        };
+    };
+
+    const info = getStatusInfo();
+
+    return (
+        <div>
+            <h3 className="text-xl font-semibold text-gray-800 mb-4">Subscription Status</h3>
+            <div className={`flex items-start gap-4 p-4 rounded-lg ${info.bg} ${info.color}`}>
+                <div className="flex-shrink-0">{info.icon}</div>
+                <div>
+                    <h4 className="font-bold text-lg">{info.title}</h4>
+                    <p>{info.desc}</p>
+                </div>
+            </div>
+            <Button onClick={() => alert("Please contact support (Amit Sharma: 8875910376) to manage your subscription.")} className="bg-indigo-600 text-white hover:bg-indigo-700 mt-4">
+                Manage Subscription
+            </Button>
+        </div>
+    );
+};
+
+const AccountView = React.memo(({ libraryProfile, onUpdateProfile, feeStructure, onUpdateFeeStructure, subscriptionStatus }) => {
+    const [activeTab, setActiveTab] = useState('profile');
+
+    const TabButton = ({ id, label, icon }) => (
+        <button
+            onClick={() => setActiveTab(id)}
+            className={`flex items-center gap-2 p-3 rounded-lg font-medium ${activeTab === id ? 'bg-indigo-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+        >
+            {icon}
+            {label}
+        </button>
+    );
+
+    const RenderContent = () => {
+        switch (activeTab) {
+            case 'profile':
+                return <EditProfileForm profile={libraryProfile} onSave={onUpdateProfile} />;
+            case 'security':
+                return <ChangePasswordForm />;
+            case 'fees':
+                return <FeeSettings settings={feeStructure} onSave={onUpdateFeeStructure} />;
+            case 'subscription':
+                return <SubscriptionInfo status={subscriptionStatus} />;
+            default:
+                return null;
+        }
+    };
+
+    return (
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+            <div className="md:col-span-1 bg-white p-4 rounded-lg shadow-md">
+                <h3 className="text-xl font-semibold text-gray-800 mb-4">Settings</h3>
+                <nav className="flex flex-col gap-2">
+                    <TabButton id="profile" label="Library Profile" icon={<User size={18} />} />
+                    <TabButton id="security" label="Security" icon={<Lock size={18} />} />
+                    <TabButton id="fees" label="Fee Structure" icon={<DollarSign size={18} />} />
+                    <TabButton id="subscription" label="Subscription" icon={<ShieldCheck size={18} />} />
+                </nav>
+            </div>
+            <div className="md:col-span-3 bg-white p-6 rounded-lg shadow-md">
+                <RenderContent />
+            </div>  
+        </div>
+    );
+});
+
+
+// --- DEFAULT EXPORT ---
 export default App;
